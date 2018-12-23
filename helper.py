@@ -15,13 +15,6 @@ TWO_WEEKS = 60 * 60 * 24 * 14
 MAX_TARGET = 0xffff * 256**(0x1d - 3)
 
 
-@SkipTest
-def run_test(test):
-    suite = TestSuite()
-    suite.addTest(test)
-    TextTestRunner().run(suite)
-
-
 def bytes_to_str(b, encoding='ascii'):
     '''Returns a string version of the bytes'''
     return b.decode(encoding)
@@ -90,16 +83,25 @@ def encode_base58_checksum(raw):
     return base58.decode('ascii')
 
 
-def decode_base58(s):
+def raw_decode_base58(s, num_bytes):
+    if type(s) == str:
+        b = s.encode('ascii')
+    else:
+        b = s
     num = 0
-    for c in s.encode('ascii'):
+    for c in b:
         num *= 58
         num += BASE58_ALPHABET.index(c)
-    combined = num.to_bytes(25, byteorder='big')
+    combined = num.to_bytes(num_bytes, 'big')
     checksum = combined[-4:]
     if hash256(combined[:-4])[:4] != checksum:
-        raise RuntimeError('bad address: {} {}'.format(checksum, hash256(combined)[:4]))
-    return combined[1:-4]
+        raise RuntimeError('bad checksum {} != {}'.format(hash256(combined[:-4])[:4].hex(), checksum.hex()))
+    return combined[:-4]
+
+
+def decode_base58(s):
+    raw = raw_decode_base58(s, 25)
+    return raw[1:]
 
 
 # next four functions are straight from BIP0173:
@@ -150,8 +152,12 @@ def encode_bech32(nums):
     return bytes([BECH32_ALPHABET[n] for n in nums])
 
 
-def encode_bech32_checksum(s, prefix=b'bc'):
+def encode_bech32_checksum(s, testnet=False):
     '''Convert a witness program to a bech32 address'''
+    if testnet:
+        prefix = b'tb'
+    else:
+        prefix = b'bc'
     version = s[0]
     if version > 0:
         version -= 0x50
@@ -563,7 +569,7 @@ class HelperTest(TestCase):
         witness = decode_bech32(addr).hex()
         want = '0020cb3e53932454c13bcef40c271bfa224fca4253b98c215cf8a0e4d00e9c8fc847'
         self.assertEqual(witness, want)
-        got = encode_bech32_checksum(bytes.fromhex(want), prefix=b'tb')
+        got = encode_bech32_checksum(bytes.fromhex(want), testnet=True)
         self.assertEqual(got, addr)
 
     def test_p2pkh_address(self):

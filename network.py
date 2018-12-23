@@ -5,15 +5,26 @@ from io import BytesIO
 from random import randint
 from unittest import TestCase
 
-from block import Block
+from block import (
+    GENESIS_BLOCK_HEADER,
+    TESTNET_GENESIS_BLOCK_HEADER,
+    LOWEST_BITS,
+    Block,
+)
 from ecc import PrivateKey
 from helper import (
+    GOLOMB_M,
+    GOLOMB_P,
+    calculate_new_bits,
     decode_base58,
+    decode_golomb,
     encode_varint,
     hash256,
+    hash_to_range,
     int_to_little_endian,
     little_endian_to_int,
     read_varint,
+    unpack_bits,
 )
 from merkleblock import MerkleBlock
 from script import p2pkh_script
@@ -23,9 +34,13 @@ TX_DATA_TYPE = 1
 BLOCK_DATA_TYPE = 2
 FILTERED_BLOCK_DATA_TYPE = 3
 COMPACT_BLOCK_DATA_TYPE = 4
+WITNESS_TX_DATA_TYPE = (1 << 30) + TX_DATA_TYPE
+WITNESS_BLOCK_DATA_TYPE = (1 << 30) + BLOCK_DATA_TYPE
 
 NETWORK_MAGIC = b'\xf9\xbe\xb4\xd9'
 TESTNET_NETWORK_MAGIC = b'\x0b\x11\x09\x07'
+
+BASIC_FILTER_TYPE = 0
 
 
 class NetworkEnvelope:
@@ -149,6 +164,26 @@ class VersionMessage:
         self.latest_block = latest_block
         self.relay = relay
 
+    @classmethod
+    def parse(cls, s):
+        version = little_endian_to_int(s.read(4))
+        services = little_endian_to_int(s.read(8))
+        timestamp = little_endian_to_int(s.read(8))
+        receiver_services = little_endian_to_int(s.read(8))
+        receiver_ip = s.read(16)[-4:]
+        receiver_port = little_endian_to_int(s.read(2))
+        sender_services = little_endian_to_int(s.read(8))
+        sender_ip = s.read(16)[-4:]
+        sender_port = little_endian_to_int(s.read(2))
+        nonce = s.read(8)
+        user_agent_length = read_varint(s)
+        user_agent = s.read(user_agent_length)
+        latest_block = little_endian_to_int(s.read(4))
+        relay = s.read(1) == b'\x01'
+        return cls(version, services, timestamp, receiver_services,
+                   receiver_ip, receiver_port, sender_services, sender_ip,
+                   sender_port, nonce, user_agent, latest_block, relay)
+
     def serialize(self):
         '''Serialize this message to send over the network'''
         # version is 4 bytes little endian
@@ -188,7 +223,6 @@ class VersionMessageTest(TestCase):
 
     def test_serialize(self):
         v = VersionMessage(timestamp=0, nonce=b'\x00' * 8)
-        print(v.serialize().hex())
         self.assertEqual(v.serialize().hex(), '7f11010000000000000000000000000000000000000000000000000000000000000000000000ffff000000008d20000000000000000000000000000000000000ffff000000008d200000000000000000182f70726f6772616d6d696e67626974636f696e3a302e312f0000000001')
 
 
@@ -307,9 +341,19 @@ class GetDataMessage:
     def __init__(self):
         self.data = []
 
-    def add_data(self, data_type, identifier):
+    def add(self, data_type, identifier):
         self.data.append((data_type, identifier))
 
+    @classmethod
+    def parse(cls, s):
+        num_items = read_varint(s)
+        result = cls()
+        for _ in range(num_items):
+            data_type = little_endian_to_int(s.read(4))
+            identifier = s.read(32)[::-1]
+            result.add(data_type, identifier)
+        return result
+        
     def serialize(self):
         # start with the number of items as a varint
         result = encode_varint(len(self.data))
@@ -322,22 +366,26 @@ class GetDataMessage:
         return result
 
 
+class InvMessage(GetDataMessage):
+    command = b'inv'
+    
+
 class GetDataMessageTest(TestCase):
 
     def test_serialize(self):
         hex_msg = '020300000030eb2540c41025690160a1014c577061596e32e426b712c7ca00000000000000030000001049847939585b0652fba793661c361223446b6fc41089b8be00000000000000'
         get_data = GetDataMessage()
         block1 = bytes.fromhex('00000000000000cac712b726e4326e596170574c01a16001692510c44025eb30')
-        get_data.add_data(FILTERED_BLOCK_DATA_TYPE, block1)
+        get_data.add(FILTERED_BLOCK_DATA_TYPE, block1)
         block2 = bytes.fromhex('00000000000000beb88910c46f6b442312361c6693a7fb52065b583979844910')
-        get_data.add_data(FILTERED_BLOCK_DATA_TYPE, block2)
+        get_data.add(FILTERED_BLOCK_DATA_TYPE, block2)
         self.assertEqual(get_data.serialize().hex(), hex_msg)
 
 
 class GetCFiltersMessage:
     command = b'getcfilters'
 
-    def __init__(self, filter_type=0, start_height=1, stop_hash=None):
+    def __init__(self, filter_type=BASIC_FILTER_TYPE, start_height=1, stop_hash=None):
         self.filter_type = filter_type
         self.start_height = start_height
         if stop_hash is None:
@@ -354,10 +402,13 @@ class GetCFiltersMessage:
 class CFilterMessage:
     command = b'cfilter'
 
-    def __init__(self, filter_type, block_hash, filter_bytes):
+    def __init__(self, filter_type, block_hash, filter_bytes, hashes):
         self.filter_type = filter_type
         self.block_hash = block_hash
         self.filter_bytes = filter_bytes
+        self.hashes = hashes
+        self.f = len(self.hashes) * GOLOMB_M
+        self.key = self.block_hash[::-1][:16]
 
     @classmethod
     def parse(cls, s):
@@ -365,13 +416,31 @@ class CFilterMessage:
         block_hash = s.read(32)[::-1]
         num_bytes = read_varint(s)
         filter_bytes = s.read(num_bytes)
-        return cls(filter_type, block_hash, filter_bytes)
+        substream = BytesIO(filter_bytes)
+        n = read_varint(substream)
+        bits = unpack_bits(substream.read())
+        hashes = set()
+        current = 0
+        for _ in range(n):
+            delta = decode_golomb(bits, GOLOMB_P)
+            current += delta
+            hashes.add(current)
+        return cls(filter_type, block_hash, filter_bytes, hashes)
+
+    def hash(self, raw_script_pubkey):
+        return hash_to_range(self.key, raw_script_pubkey, self.f)
+
+    def __contains__(self, raw_script_pubkeys):
+        for raw_script_pubkey in raw_script_pubkeys:
+            if self.hash(raw_script_pubkey) in self.hashes:
+                return True
+        return False
 
 
 class GetCFHeadersMessage:
     command = b'getcfheaders'
 
-    def __init__(self, filter_type=0, start_height=0, stop_hash=None):
+    def __init__(self, filter_type=BASIC_FILTER_TYPE, start_height=0, stop_hash=None):
         self.filter_type = filter_type
         self.start_height = start_height
         if stop_hash is None:
@@ -406,6 +475,40 @@ class CFHeadersMessage:
         return cls(filter_type, stop_hash, previous_filter_header, filter_hashes)
 
 
+class GetCFCheckPoint:
+    command = b'getcfcheckpt'
+
+    def __init__(self, filter_type=BASIC_FILTER_TYPE, stop_hash=None):
+        self.filter_type = filter_type
+        if stop_hash is None:
+            raise RuntimeError('Need a stop hash')
+        self.stop_hash = stop_hash
+
+    def serialize(self):
+        result = self.filter_type.to_bytes(1, 'big')
+        result += self.stop_hash[::-1]
+        return result
+
+
+class CFCheckPoint:
+    command = b'cfcheckpt'
+
+    def __init__(self, filter_type, stop_hash, filter_headers):
+        self.filter_type = filter_type
+        self.stop_hash = stop_hash
+        self.filter_headers = filter_headers
+
+    @classmethod
+    def parse(cls, s):
+        filter_type = s.read(1)[0]
+        stop_hash = s.read(32)[::-1]
+        filter_headers_length = read_varint(s)
+        filter_headers = []
+        for _ in range(filter_headers_length):
+            filter_headers.append(s.read(32)[::-1])
+        return cls(filter_type, stop_hash, filter_headers)
+
+
 class GenericMessage:
     def __init__(self, command, payload):
         self.command = command
@@ -417,7 +520,7 @@ class GenericMessage:
 
 class SimpleNode:
 
-    def __init__(self, host, port=None, testnet=False, logging=False):
+    def __init__(self, host, port=None, testnet=False, logging=False, init=False, load_cache=False):
         if port is None:
             if testnet:
                 port = 18333
@@ -426,16 +529,41 @@ class SimpleNode:
         self.testnet = testnet
         self.logging = logging
         # connect to socket
+        self.host = host
+        self.port = port
+        self.headers = []
+        self.cfheaders = []
+        self.cfhashes = []
+        if load_cache:
+            print('loading data')
+            self.load_cache()
+            self.latest_block = self.start_height - 1
+        print('initiating connection')
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((host, port))
-        # create a stream that we can use with the rest of the library
+        self.connect()
+        if init:
+            self.initialize()
+
+    def initialize(self):
+        print('downloading latest headers')
+        self.download_headers()
+        print('downloading compact filters')
+        self.download_cfheaders()
+        print('writing to disk')
+        self.dump_cache()
+
+    def connect(self):
+        self.socket.connect((self.host, self.port))
         self.stream = self.socket.makefile('rb', None)
+        self.handshake()
 
     def handshake(self):
         '''Do a handshake with the other node.
         Handshake is sending a version message and getting a verack back.'''
-        # create a version message
-        version = VersionMessage()
+        # create a version message signaling segwit and compact filters
+        services = (1 << 3) | (1 << 6)
+        version = VersionMessage(services=services, receiver_services=services,
+                                 sender_services=services)
         # send the command
         self.send(version)
         # wait for a verack message
@@ -471,6 +599,8 @@ class SimpleNode:
             command = envelope.command
             # we know how to respond to version and ping, handle that here
             if command == VersionMessage.command:
+                version = VersionMessage.parse(envelope.stream())
+                self.latest_block = version.latest_block
                 # send verack
                 self.send(VerAckMessage())
             elif command == PingMessage.command:
@@ -479,12 +609,188 @@ class SimpleNode:
         # return the envelope parsed as a member of the right message class
         return command_to_class[command].parse(envelope.stream())
 
+    def download_headers(self):
+        if len(self.headers) == 0:
+            # start from the genesis block
+            if self.testnet:
+                header = TESTNET_GENESIS_BLOCK_HEADER
+            else:
+                header = GENESIS_BLOCK_HEADER
+            previous = Block.parse_header(BytesIO(header))
+            self.headers = [previous]
+        else:
+            # last difficulty adjustment
+            index = (len(self.headers) // 2016) * 2016
+            self.headers = self.headers[:index+1]
+            previous = self.headers[index]
+        first_epoch_timestamp = previous.timestamp
+        epoch_bits = previous.bits
+        count = len(self.headers)
+        self.start_height = count
+        while count < self.latest_block:
+            # ask for headers
+            getheaders = GetHeadersMessage(start_block=previous.hash())
+            self.send(getheaders)
+            headers = self.wait_for(HeadersMessage)
+            # validate headers
+            for header in headers.blocks:
+                if not header.check_pow():
+                    raise RuntimeError('{}: PoW is invalid'.format(count))
+                if header.prev_block != previous.hash():
+                    raise RuntimeError('{}: not sequential'.format(count))
+                if count % 2016 == 0:
+                    # difficulty adjustment
+                    time_diff = previous.timestamp - first_epoch_timestamp
+                    epoch_bits = calculate_new_bits(previous.bits, time_diff)
+                    expected_bits = epoch_bits
+                    first_epoch_timestamp = header.timestamp
+                elif self.testnet and header.timestamp > previous.timestamp + 20 * 60:
+                    expected_bits = LOWEST_BITS
+                else:
+                    expected_bits = epoch_bits
+                if header.bits != expected_bits:
+                    raise RuntimeError('{}: bad bits {} vs {}'.format(
+                        count, header.bits.hex(), expected_bits.hex()))
+                previous = header
+                count += 1
+            self.headers.extend(headers.blocks)
+            if len(headers.blocks) != 2000:
+                break
+
+    def download_cfheaders(self):
+        if len(self.headers) == 0:
+            raise RuntimeError
+        # download compact filter checkpoints
+        getcfcheckpoint = GetCFCheckPoint(stop_hash=self.headers[-1].hash())
+        self.send(getcfcheckpoint)
+        cfcheckpoint = self.wait_for(CFCheckPoint)
+        # download all cfheaders
+        prev_filter_header = b'\x00' * 32
+        for i, cpfilter_header in enumerate(cfcheckpoint.filter_headers):
+            if i == 0:
+                start_height = i * 1000
+            else:
+                start_height = i * 1000 + 1
+            end_height = (i+1) * 1000
+            if end_height < self.start_height:
+                prev_filter_header = cpfilter_header
+                continue
+            print('getting range {} to {}'.format(start_height, end_height))
+            getcfheaders = GetCFHeadersMessage(
+                start_height=start_height,
+                stop_hash=self.headers[end_height].hash(),
+            )
+            self.send(getcfheaders)
+            cfheaders = self.wait_for(CFHeadersMessage)
+            if prev_filter_header != cfheaders.previous_filter_header:
+                raise RuntimeError('Non-sequential CF headers')
+            # validate all cfheaders
+            for j, filter_hash in enumerate(cfheaders.filter_hashes):
+                header = self.headers[start_height + j]
+                filter_header = hash256(filter_hash[::-1] + prev_filter_header[::-1])[::-1]
+                prev_filter_header = filter_header
+                header.cfhash = filter_hash
+                header.cfheader = filter_header
+            if cpfilter_header != prev_filter_header:
+                raise RuntimeError('CF header not what we expected')
+        # download the last cfheaders
+        start_height += 1000
+        print('getting range {} to {}'.format(start_height, len(self.headers)))
+        getcfheaders = GetCFHeadersMessage(
+            start_height=start_height,
+            stop_hash=self.headers[-1].hash(),
+        )
+        self.send(getcfheaders)
+        cfheaders = self.wait_for(CFHeadersMessage)
+        # validate all cfheaders
+        for j, filter_hash in enumerate(cfheaders.filter_hashes):
+            header = self.headers[start_height + j]
+            filter_header = hash256(filter_hash[::-1] + prev_filter_header[::-1])[::-1]
+            prev_filter_header = filter_header
+            header.cfhash = filter_hash
+            header.cfheader = filter_header
+
+    def send_tx(self, tx_obj):
+        # send an inv message with out tx
+        inv = InvMessage()
+        tx_hash = tx_obj.hash()
+        inv.add(TX_DATA_TYPE, tx_hash)
+        self.send(inv)
+        # wait for a GetDataMessage
+        getdata = self.wait_for(GetDataMessage)
+        for data_type, identifier in getdata.data:
+            if identifier == tx_hash and data_type == WITNESS_TX_DATA_TYPE:
+                print('sending tx')
+                self.send(tx_obj)
+                break
+        # wait a sec so this message goes through with time.sleep(1)
+        time.sleep(1)
+        # now ask for this transaction from the other node
+        # create a GetDataMessage
+        getdata = GetDataMessage()
+        # ask for our transaction by adding it to the message
+        getdata.add(WITNESS_TX_DATA_TYPE, tx_obj.hash())
+        # send the message
+        self.send(getdata)
+        # now wait for a Tx response
+        received_tx = self.wait_for(Tx)
+        # if the received tx has the same id as our tx, we are done!
+        assert(received_tx.id() == tx_obj.id())
+        return tx_obj.id()
+
+    def dump_cache(self):
+        if self.testnet:
+            prefix = 'testnet'
+        else:
+            prefix = 'mainnet'
+        filename = '{}-headers.cache'.format(prefix)
+        with open(filename, 'wb') as f:
+            for h in self.headers:
+                f.write(h.serialize())
+        filename = '{}-cfheaders.cache'.format(prefix)
+        with open(filename, 'wb') as f:
+            for h in self.headers:
+                f.write(h.cfheader)
+        filename = '{}-cfhashes.cache'.format(prefix)
+        with open(filename, 'wb') as f:
+            for h in self.headers:
+                f.write(h.cfhash)
+
+    def load_cache(self):
+        if self.testnet:
+            prefix = 'testnet'
+        else:
+            prefix = 'mainnet'
+        filename = '{}-headers.cache'.format(prefix)
+        self.headers = []
+        with open(filename, 'rb') as f:
+            while True:
+                if f.read(1) == b'':
+                    break
+                else:
+                    f.seek(-1, 1)
+                self.headers.append(Block.parse_header(f))
+        self.start_height = len(self.headers)
+        filename = '{}-cfheaders.cache'.format(prefix)
+        with open(filename, 'rb') as f:
+            for header in self.headers:
+                header.cfheader = f.read(32)
+                if not header.cfheader:
+                    self.start_height = self.headers.index(header)
+        filename = '{}-cfhashes.cache'.format(prefix)
+        with open(filename, 'rb') as f:
+            for header in self.headers:
+                header.cfhash = f.read(32)
+                if not header.cfhash:
+                    index = self.headers.index(header)
+                    if index < self.start_height:
+                        self.start_height = index
+
 
 class SimpleNodeTest(TestCase):
 
     def test_handshake(self):
-        node = SimpleNode('tbtc.programmingblockchain.com', testnet=True)
-        node.handshake()
+        SimpleNode('testnet.programmingbitcoin.com', testnet=True)
 
 
 class IntegrationTest(TestCase):
@@ -500,14 +806,12 @@ class IntegrationTest(TestCase):
         target_h160 = decode_base58(target_address)
         target_script = p2pkh_script(target_h160)
         fee = 5000  # fee in satoshis
-        # connect to tbtc.programmingblockchain.com in testnet mode
-        node = SimpleNode('tbtc.programmingblockchain.com', testnet=True, logging=False)
+        # connect to programmingblockchain.com in testnet mode
+        node = SimpleNode('programmingblockchain.com', testnet=True)
         # create a bloom filter of size 30 and 5 functions. Add a tweak.
         bf = BloomFilter(30, 5, 90210)
         # add the h160 to the bloom filter
         bf.add(h160)
-        # complete the handshake
-        node.handshake()
         # load the bloom filter with the filterload command
         node.send(bf.filterload())
         # set start block to last_block from above
@@ -531,7 +835,7 @@ class IntegrationTest(TestCase):
                 raise RuntimeError('chain broken')
             # add a new item to the getdata message
             # should be FILTERED_BLOCK_DATA_TYPE and block hash
-            getdata.add_data(FILTERED_BLOCK_DATA_TYPE, b.hash())
+            getdata.add(FILTERED_BLOCK_DATA_TYPE, b.hash())
             # set the last block to the current hash
             last_block = b.hash()
         # send the getdata message
@@ -582,7 +886,7 @@ class IntegrationTest(TestCase):
         # create a GetDataMessage
         getdata = GetDataMessage()
         # ask for our transaction by adding it to the message
-        getdata.add_data(TX_DATA_TYPE, tx_obj.hash())
+        getdata.add(TX_DATA_TYPE, tx_obj.hash())
         # send the message
         node.send(getdata)
         # now wait for a Tx response

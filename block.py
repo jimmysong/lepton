@@ -12,11 +12,13 @@ from helper import (
 from tx import Tx
 
 
-GENESIS_BLOCK_HASH = bytes.fromhex('000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f')
-TESTNET_GENESIS_BLOCK_HASH = bytes.fromhex('000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943')
+GENESIS_BLOCK_HEADER = bytes.fromhex('0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c')
+TESTNET_GENESIS_BLOCK_HEADER = bytes.fromhex('0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae18')
+LOWEST_BITS = bytes.fromhex('ffff001d')
 
 
 class Block:
+    command = b'block'
 
     def __init__(self, version, prev_block, merkle_root,
                  timestamp, bits, nonce, txs=None, tx_hashes=None):
@@ -26,6 +28,7 @@ class Block:
         self.timestamp = timestamp
         self.bits = bits
         self.nonce = nonce
+        self.txs = txs
         self.tx_hashes = tx_hashes
 
     def __repr__(self):
@@ -170,6 +173,8 @@ class BlockTest(TestCase):
         self.assertEqual(block.bits, bytes.fromhex('e93c0118'))
         self.assertEqual(block.nonce, bytes.fromhex('a4ffd71d'))
         self.assertEqual(block.id(), '0000000000000000007e9e4c586439b0cdbe13b1370bdd9435d76a644d047523')
+        self.assertEqual(block.get_outpoints(), [])
+        self.assertTrue(block.id() in block.__repr__())
 
     def test_serialize(self):
         block_raw = bytes.fromhex('020000208ec39428b17323fa0ddec8e887b4a7c53b8c0a0a220cfd0000000000000000005b0750fce0a889502d40508d39576821155e9c9e3f5c3157f961db38fd8b25be1e77a759e93c0118a4ffd71d')

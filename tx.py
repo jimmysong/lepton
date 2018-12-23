@@ -58,6 +58,11 @@ class TxFetcher:
         return cls.cache[tx_id]
 
     @classmethod
+    def add(cls, txs):
+        for t in txs:
+            cls.cache[t.hash()] = t
+    
+    @classmethod
     def load_cache(cls, filename):
         disk_cache = json.loads(open(filename, 'r').read())
         for k, raw_hex in disk_cache.items():

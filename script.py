@@ -6,6 +6,8 @@ from ecc import PrivateKey
 
 from helper import (
     hash256,
+    decode_base58,
+    decode_bech32,
     encode_bech32_checksum,
     encode_varint,
     h160_to_p2pkh_address,
@@ -27,6 +29,24 @@ from op import (
 
 LOGGER = getLogger(__name__)
 DEBUG = False
+
+
+def address_to_script_pubkey(s):
+    if s[:1] in ('1', 'm', 'n'):
+        # p2pkh
+        h160 = decode_base58(s)
+        return p2pkh_script(h160)
+    elif s[:1] in ('2', '3'):
+        # p2sh
+        h160 = decode_base58(s)
+        return p2sh_script(h160)
+    elif s[:3] in ('bc1', 'tb1'):
+        # p2wpkh
+        raw_script = decode_bech32(s)
+        prefix = encode_varint(len(raw_script))
+        return Script.parse(BytesIO(prefix+raw_script))
+    else:
+        raise RuntimeError('unknown type of address: {}'.format(s))
 
 
 def p2pkh_script(h160):
@@ -384,22 +404,14 @@ class Script:
             return h160_to_p2sh_address(h160, testnet)
         elif self.is_p2wpkh_script_pubkey():  # p2sh
             # hash160 is the 2nd element
-            if testnet:
-                prefix = b'tb'
-            else:
-                prefix = b'bc'
             witness_program = self.raw_serialize()
             # convert to bech32 address using encode_bech32_checksum
-            return encode_bech32_checksum(witness_program, prefix=prefix)
+            return encode_bech32_checksum(witness_program, testnet)
         elif self.is_p2wsh_script_pubkey():  # p2sh
             # hash160 is the 2nd element
-            if testnet:
-                prefix = b'tb'
-            else:
-                prefix = b'bc'
             witness_program = self.raw_serialize()
             # convert to bech32 address using encode_bech32_checksum
-            return encode_bech32_checksum(witness_program, prefix=prefix)
+            return encode_bech32_checksum(witness_program, testnet)
 
     def has_op_return(self):
         return 106 in self.instructions
@@ -511,3 +523,9 @@ class ScriptTest(TestCase):
         raw_script = bytes.fromhex('4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73')
         s = Script.parse(BytesIO(raw_script))
         self.assertTrue(s.instructions[2].find(b'The Times 03/Jan/2009') != -1)
+
+    def test_address_to_script_pubkey(self):
+        address = 'tb1qm6jesfwzg7w4xjq3tw9uj4wwz2gy73yym4mw5w'
+        script_pubkey = address_to_script_pubkey(address)
+        self.assertEqual(script_pubkey.instructions[0], 0)
+        self.assertEqual(script_pubkey.instructions[1].hex(), 'dea59825c2479d5348115b8bc955ce12904f4484')

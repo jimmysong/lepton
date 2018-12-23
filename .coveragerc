@@ -1,0 +1,16 @@
+[report]
+include=
+    block.py
+    bloomfilter.py
+    ecc.py
+    hd.py
+    helper.py
+    merkleblock.py
+    mnemonic.py
+    network.py
+    op.py
+    script.py
+    tx.py
+    wallet.py
+
+show_missing=True

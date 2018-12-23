@@ -5,7 +5,7 @@ from unittest import TestCase
 import hashlib
 import hmac
 
-from helper import encode_base58_checksum, hash160
+from helper import encode_base58_checksum, encode_bech32_checksum, hash160
 
 
 class FieldElement:
@@ -87,8 +87,9 @@ class FieldElementTest(TestCase):
         b = FieldElement(2, 31)
         c = FieldElement(15, 31)
         self.assertEqual(a, b)
-        self.assertTrue(a != c)
+        self.assertNotEqual(a, c)
         self.assertFalse(a != b)
+        self.assertNotEqual(a, None)
 
     def test_add(self):
         a = FieldElement(2, 31)
@@ -132,6 +133,20 @@ class FieldElementTest(TestCase):
         a = FieldElement(4, 31)
         b = FieldElement(11, 31)
         self.assertEqual(a**-4 * b, FieldElement(13, 31))
+
+    def test_errors(self):
+        with self.assertRaises(ValueError):
+            FieldElement(5,3)
+        a = FieldElement(3, 31)
+        b = FieldElement(3, 29)
+        with self.assertRaises(TypeError):
+            a+b
+        with self.assertRaises(TypeError):
+            a-b
+        with self.assertRaises(TypeError):
+            a*b
+        with self.assertRaises(TypeError):
+            a/b
 
 
 class Point:
@@ -244,6 +259,8 @@ class PointTest(TestCase):
         self.assertEqual(a + b, b)
         self.assertEqual(b + a, b)
         self.assertEqual(b + c, a)
+        self.assertEqual(a.__repr__(), 'Point(infinity)')
+        self.assertEqual(b.__repr__(), 'Point(2,5)_5_7')
 
     def test_add1(self):
         a = Point(x=3, y=7, a=5, b=7)
@@ -253,6 +270,16 @@ class PointTest(TestCase):
     def test_add2(self):
         a = Point(x=-1, y=1, a=5, b=7)
         self.assertEqual(a + a, Point(x=18, y=-77, a=5, b=7))
+
+    def test_add3(self):
+        a = Point(x=0, y=0, a=5, b=0)
+        self.assertEqual(a + a, Point(x=None, y=None, a=5, b=0))
+
+    def test_error(self):
+        a = Point(x=3, y=7, a=5, b=7)
+        b = Point(x=None, y=None, a=0, b=7)
+        with self.assertRaises(TypeError):
+            a+b
 
 
 class ECCTest(TestCase):
@@ -426,6 +453,13 @@ class S256Point(Point):
             prefix = b'\x00'
         return encode_base58_checksum(prefix + h160)
 
+    def bech32_address(self, testnet=False):
+        '''Returns the address string'''
+        from script import p2wpkh_script
+        h160 = self.hash160()
+        raw = p2wpkh_script(h160).raw_serialize()
+        return encode_bech32_checksum(raw, testnet)
+
     @classmethod
     def parse(self, sec_bin):
         '''returns a Point object from a SEC binary (not hex)'''
@@ -460,7 +494,9 @@ class S256Test(TestCase):
 
     def test_order(self):
         point = N * G
-        self.assertIsNone(point.x)
+        self.assertEqual(point.__repr__(), 'S256Point(infinity)')
+        self.assertTrue(G.x.__repr__() in G.__repr__())
+        self.assertTrue(G.y.__repr__() in G.__repr__())
 
     def test_pubpoint(self):
         # write a test that tests the public point for the following
@@ -499,18 +535,30 @@ class S256Test(TestCase):
         point = coefficient * G
         self.assertEqual(point.sec(compressed=False), bytes.fromhex(uncompressed))
         self.assertEqual(point.sec(compressed=True), bytes.fromhex(compressed))
+        computed = S256Point.parse(bytes.fromhex(uncompressed))
+        self.assertEqual(point.x, computed.x)
+        computed = S256Point.parse(bytes.fromhex(compressed))
+        self.assertEqual(point.x, computed.x)
         coefficient = 123
         uncompressed = '04a598a8030da6d86c6bc7f2f5144ea549d28211ea58faa70ebf4c1e665c1fe9b5204b5d6f84822c307e4b4a7140737aec23fc63b65b35f86a10026dbd2d864e6b'
         compressed = '03a598a8030da6d86c6bc7f2f5144ea549d28211ea58faa70ebf4c1e665c1fe9b5'
         point = coefficient * G
         self.assertEqual(point.sec(compressed=False), bytes.fromhex(uncompressed))
         self.assertEqual(point.sec(compressed=True), bytes.fromhex(compressed))
+        computed = S256Point.parse(bytes.fromhex(uncompressed))
+        self.assertEqual(point.x, computed.x)
+        computed = S256Point.parse(bytes.fromhex(compressed))
+        self.assertEqual(point.x, computed.x)
         coefficient = 42424242
         uncompressed = '04aee2e7d843f7430097859e2bc603abcc3274ff8169c1a469fee0f20614066f8e21ec53f40efac47ac1c5211b2123527e0e9b57ede790c4da1e72c91fb7da54a3'
         compressed = '03aee2e7d843f7430097859e2bc603abcc3274ff8169c1a469fee0f20614066f8e'
         point = coefficient * G
         self.assertEqual(point.sec(compressed=False), bytes.fromhex(uncompressed))
         self.assertEqual(point.sec(compressed=True), bytes.fromhex(compressed))
+        computed = S256Point.parse(bytes.fromhex(uncompressed))
+        self.assertEqual(point.x, computed.x)
+        computed = S256Point.parse(bytes.fromhex('02' + compressed[2:]))
+        self.assertEqual(point.x, computed.x)
 
     def test_address(self):
         secret = 888**3
@@ -521,6 +569,13 @@ class S256Test(TestCase):
             point.address(compressed=True, testnet=False), mainnet_address)
         self.assertEqual(
             point.address(compressed=True, testnet=True), testnet_address)
+        mainnet_address = 'bc1qyfvunnpszmjwcqgfk9dsne6j4edq3fglx9y5x7'
+        testnet_address = 'tb1qyfvunnpszmjwcqgfk9dsne6j4edq3fglvrl8ad'
+        point = secret * G
+        self.assertEqual(
+            point.bech32_address(testnet=False), mainnet_address)
+        self.assertEqual(
+            point.bech32_address(testnet=True), testnet_address)
         secret = 321
         mainnet_address = '1S6g2xBJSED7Qr9CYZib5f4PYVhHZiVfj'
         testnet_address = 'mfx3y63A7TfTtXKkv7Y6QzsPFY6QCBCXiP'
@@ -555,7 +610,7 @@ class Signature:
         # if rbin has a high bit, add a \x00
         if rbin[0] & 0x80:
             rbin = b'\x00' + rbin
-        result = bytes([2, len(rbin)]) + rbin  # <1>
+        result = bytes([2, len(rbin)]) + rbin
         sbin = self.s.to_bytes(32, byteorder='big')
         # remove all null bytes at the beginning
         sbin = sbin.lstrip(b'\x00')
@@ -585,7 +640,7 @@ class Signature:
         slength = s.read(1)[0]
         s = int.from_bytes(s.read(slength), 'big')
         if len(signature_bin) != 6 + rlength + slength:
-            raise SyntaxError("Signature too long")
+            raise SyntaxError("Signature wrong length")
         return cls(r, s)
 
 
@@ -596,13 +651,27 @@ class SignatureTest(TestCase):
             (1, 2),
             (randint(0, 2**256), randint(0, 2**255)),
             (randint(0, 2**256), randint(0, 2**255)),
+            (0x80, 0x80),
         )
         for r, s in testcases:
             sig = Signature(r, s)
+            self.assertTrue('Signature' in sig.__repr__())
             der = sig.der()
             sig2 = Signature.parse(der)
             self.assertEqual(sig2.r, r)
             self.assertEqual(sig2.s, s)
+
+    def test_error(self):
+        with self.assertRaises(SyntaxError):
+            Signature.parse(b'\x29')
+        with self.assertRaises(SyntaxError):
+            Signature.parse(b'\x30\x02\x01')
+        with self.assertRaises(SyntaxError):
+            Signature.parse(b'\x30\x02\x01\x01')
+        with self.assertRaises(SyntaxError):
+            Signature.parse(b'\x30\x05\x02\x02\x01\x01\x01')
+        with self.assertRaises(SyntaxError):
+            Signature.parse(b'\x30\x08\x02\x02\x00\x00\x02\x01\x00\x00')
 
 
 class PrivateKey:
@@ -610,9 +679,6 @@ class PrivateKey:
     def __init__(self, secret):
         self.secret = secret
         self.point = secret * G
-
-    def hex(self):
-        return '{:x}'.format(self.secret).zfill(64)
 
     def sign(self, z):
         k = self.deterministic_k(z)
@@ -645,8 +711,8 @@ class PrivateKey:
             candidate = int.from_bytes(v, 'big')
             if candidate >= 1 and candidate < N:
                 return candidate
-            k = hmac.new(k, v + b'\x00', s256).digest()
-            v = hmac.new(k, v, s256).digest()
+            k = hmac.new(k, v + b'\x00', s256).digest()  # pragma: no cover
+            v = hmac.new(k, v, s256).digest()            # pragma: no cover
 
     def wif(self, compressed=True, testnet=False):
         # convert the secret from integer to a 32-bytes in big endian using num.to_bytes(32, 'big')
@@ -668,8 +734,12 @@ class PrivateKey:
 class PrivateKeyTest(TestCase):
 
     def test_sign(self):
-        pk = PrivateKey(randint(0, N))
-        z = randint(0, 2**256)
+        pk = PrivateKey(N-99)
+        z = N-48
+        sig = pk.sign(z)
+        self.assertTrue(pk.point.verify(z, sig))
+        pk = PrivateKey(N-99)
+        z = N+99
         sig = pk.sign(z)
         self.assertTrue(pk.point.verify(z, sig))
 
