@@ -2,6 +2,7 @@
 include=
     block.py
     bloomfilter.py
+    chainstore.py
     ecc.py
     hd.py
     helper.py

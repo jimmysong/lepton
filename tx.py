@@ -1,4 +1,5 @@
 from io import BytesIO
+from os.path import exists
 from unittest import TestCase
 
 import json
@@ -26,54 +27,60 @@ from script import (
 )
 
 
-class TxFetcher:
-    cache = {}
+class TxStore:
+
+    testnet_store = None
+    mainnet_store = None
 
     @classmethod
-    def get_url(cls, testnet=False):
+    def get_store(cls, testnet=False):
         if testnet:
-            return 'http://testnet.programmingbitcoin.com'
+            if cls.testnet_store is None:
+                cls.testnet_store = cls(testnet=True)
+            return cls.testnet_store
         else:
-            return 'http://mainnet.programmingbitcoin.com'
-
-    @classmethod
-    def fetch(cls, tx_id, testnet=False, fresh=False):
-        if fresh or (tx_id not in cls.cache):
-            url = '{}/tx/{}.hex'.format(cls.get_url(testnet), tx_id)
-            response = requests.get(url)
-            try:
-                raw = bytes.fromhex(response.text.strip())
-            except ValueError:
-                raise RuntimeError(response.text)
-            # make sure the tx we got matches to the hash we requested
-            tx = Tx.parse(BytesIO(raw), testnet=testnet)
-            if tx.segwit:
-                computed = tx.id()
-            else:
-                computed = hash256(raw)[::-1].hex()
-            if computed != tx_id:
-                raise RuntimeError('server lied: {} vs {}'.format(computed, tx_id))
-            cls.cache[tx_id] = tx
-        cls.cache[tx_id].testnet = testnet
-        return cls.cache[tx_id]
-
-    @classmethod
-    def add(cls, txs):
-        for t in txs:
-            cls.cache[t.hash()] = t
+            if cls.mainnet_store is None:
+                cls.mainnet_store = cls(testnet=False)
+            return cls.mainnet_store
     
     @classmethod
-    def load_cache(cls, filename):
-        disk_cache = json.loads(open(filename, 'r').read())
-        for k, raw_hex in disk_cache.items():
-            cls.cache[k] = Tx.parse(BytesIO(bytes.fromhex(raw_hex)))
+    def fetch(cls, tx_id, testnet=False):
+        store = cls.get_store(testnet)
+        result = store.get(bytes.fromhex(tx_id))
+        if result is None:
+            raise ValueError('no {} transaction with id {}'.format(testnet, tx_id))
+        return result
 
-    @classmethod
-    def dump_cache(cls, filename):
-        with open(filename, 'w') as f:
-            to_dump = {k: tx.serialize().hex() for k, tx in cls.cache.items()}
-            s = json.dumps(to_dump, sort_keys=True, indent=4)
-            f.write(s)
+    def __init__(self, testnet=False, filename=None):
+        self.testnet = testnet
+        if filename is None:
+            if testnet:
+                self.filename = 'txs.testnet'
+            else:
+                self.filename = 'txs.mainnet'
+        else:
+            self.filename = filename
+        self.node = None
+        self.tx_lookup = {}
+        if exists(self.filename):
+            with open(self.filename, 'rb') as f:
+                num_txs = read_varint(f)
+                for _ in range(num_txs):
+                    tx_obj = Tx.parse(f, testnet=self.testnet)
+                    self.tx_lookup[tx_obj.hash()] = tx_obj
+
+    def save(self):
+        with open(self.filename, 'wb') as f:
+            f.write(encode_varint(len(self.tx_lookup)))
+            for tx_hash in sorted(self.tx_lookup.keys()):
+                tx_obj = self.tx_lookup[tx_hash]
+                f.write(tx_obj.serialize())
+
+    def add(self, tx_obj):
+        self.tx_lookup[tx_obj.hash()] = tx_obj
+
+    def get(self, tx_hash):
+        return self.tx_lookup.get(tx_hash)
 
 
 class Tx:
@@ -335,7 +342,7 @@ class Tx:
         else:
             script_code = p2pkh_script(tx_in.script_pubkey(self.testnet).instructions[1]).serialize()
         s += script_code
-        s += int_to_little_endian(tx_in.value(), 8)
+        s += int_to_little_endian(tx_in.value(self.testnet), 8)
         s += int_to_little_endian(tx_in.sequence, 4)
         s += self.hash_outputs()
         s += int_to_little_endian(self.locktime, 4)
@@ -592,7 +599,7 @@ class TxIn:
         return result
 
     def fetch_tx(self, testnet=False):
-        return TxFetcher.fetch(self.prev_tx.hex(), testnet=testnet)
+        return TxStore.fetch(self.prev_tx.hex(), testnet=testnet)
 
     def value(self, testnet=False):
         '''Get the outpoint value by looking up the tx hash
@@ -652,20 +659,36 @@ class TxTest(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # fill with cache so we don't have to be online to run these tests
-        TxFetcher.load_cache(cls.cache_file)
-
-    @classmethod
-    def tearDownClass(cls):
-        # write the cache to disk
-        TxFetcher.dump_cache(cls.cache_file)
+        # fill with data from storage
+        TxStore.testnet_store = TxStore(
+            testnet=True, filename='testing-txs.testnet')
+        TxStore.mainnet_store = TxStore(
+            testnet=False, filename='testing-txs.mainnet')
+        # weird transactions
+        lookup = TxStore.testnet_store.tx_lookup
+        weird = (
+            (
+                'c5d4b73af6eed28798473b05d2b227edd4f285069629843e899b52c2d1c165b7',
+                '36d56883f4434e7b6a9411ba78cc9be767ae829d5559c442633e5b1b5f91d1c4',
+            ),
+            (
+                '74ea059a63c7ebddaee6805e1560b15c937d99a9ee9745412cbc6d2a0a5f5305',
+                '14a05e4b170af131c94b08a8f51c482dc4ab4594ec4db31260a5f27721ab2a5e',
+            ),
+            (
+                'e335562f7e297aadeed88e5954bc4eeb8dc00b31d829eedb232e39d672b0c009',
+                'c50b64ace11c66c362e18fb310c9cf22d3da22e63f144e4b79b7046fbd0f778b',
+            ),
+        )
+        for a, b in weird:
+            lookup[bytes.fromhex(a)] = lookup[bytes.fromhex(b)]
 
     def test_parse_version(self):
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         self.assertEqual(tx.version, 1)
 
     def test_parse_inputs(self):
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         self.assertEqual(len(tx.tx_ins), 1)
         want = 'd1c789a9c60383bf715f3f6ad9d14b91fe55f3deb369fe5d9280cb1a01793f81'
         self.assertEqual(tx.tx_ins[0].prev_tx.hex(), want)
@@ -675,7 +698,7 @@ class TxTest(TestCase):
         self.assertEqual(tx.tx_ins[0].sequence, 0xfffffffe)
 
     def test_parse_outputs(self):
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         self.assertEqual(len(tx.tx_outs), 2)
         want = 32454049
         self.assertEqual(tx.tx_outs[0].amount, want)
@@ -687,7 +710,7 @@ class TxTest(TestCase):
         self.assertEqual(tx.tx_outs[1].script_pubkey.serialize().hex(), want)
 
     def test_parse_locktime(self):
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         self.assertEqual(tx.locktime, 410393)
 
     def test_parse(self):
@@ -697,7 +720,7 @@ class TxTest(TestCase):
 
     def test_serialize(self):
         raw_tx = '0100000001813f79011acb80925dfe69b3def355fe914bd1d96a3f5f71bf8303c6a989c7d1000000006b483045022100ed81ff192e75a3fd2304004dcadb746fa5e24c5031ccfcf21320b0277457c98f02207a986d955c6e0cb35d446a89d3f56100f4d7f67801c31967743a9c8e10615bed01210349fc4e631e3624a545de3f89f5d8684c7b8138bd94bdd531d2e213bf016b278afeffffff02a135ef01000000001976a914bc3b654dca7e56b04dca18f2566cdaf02e8d9ada88ac99c39800000000001976a9141c4bc762dd5423e332166702cb75f40df79fea1288ac19430600'
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         self.assertEqual(tx.serialize().hex(), raw_tx)
 
     def test_input_value(self):
@@ -715,82 +738,82 @@ class TxTest(TestCase):
         self.assertEqual(tx_in.script_pubkey().serialize().hex(), want)
 
     def test_fee(self):
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         self.assertEqual(tx.fee(), 40000)
-        tx = TxFetcher.fetch('ee51510d7bbabe28052038d1deb10c03ec74f06a79e21913c6fcf48d56217c87')
+        tx = TxStore.fetch('ee51510d7bbabe28052038d1deb10c03ec74f06a79e21913c6fcf48d56217c87')
         self.assertEqual(tx.fee(), 140500)
 
     def test_sig_hash(self):
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         want = int('27e0c5994dec7824e56dec6b2fcb342eb7cdb0d0957c2fce9882f715e85d81a6', 16)
         self.assertEqual(tx.sig_hash(0), want)
 
     def test_verify_p2pkh(self):
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         self.assertTrue(tx.verify())
 
     def test_verify_p2sh(self):
-        tx = TxFetcher.fetch('46df1a9484d0a81d03ce0ee543ab6e1a23ed06175c104a178268fad381216c2b')
+        tx = TxStore.fetch('46df1a9484d0a81d03ce0ee543ab6e1a23ed06175c104a178268fad381216c2b')
         self.assertTrue(tx.verify())
 
     def test_verify_p2wpkh(self):
-        tx = TxFetcher.fetch('d869f854e1f8788bcff294cc83b280942a8c728de71eb709a2c29d10bfe21b7c', testnet=True)
+        tx = TxStore.fetch('d869f854e1f8788bcff294cc83b280942a8c728de71eb709a2c29d10bfe21b7c', testnet=True)
         self.assertTrue(tx.verify())
 
     def test_verify_p2sh_p2wpkh(self):
-        tx = TxFetcher.fetch('c586389e5e4b3acb9d6c8be1c19ae8ab2795397633176f5a6442a261bbdefc3a')
+        tx = TxStore.fetch('c586389e5e4b3acb9d6c8be1c19ae8ab2795397633176f5a6442a261bbdefc3a')
         self.assertTrue(tx.verify())
 
     def test_verify_p2wsh(self):
-        tx = TxFetcher.fetch('78457666f82c28aa37b74b506745a7c7684dc7842a52a457b09f09446721e11c', testnet=True)
+        tx = TxStore.fetch('78457666f82c28aa37b74b506745a7c7684dc7842a52a457b09f09446721e11c', testnet=True)
         self.assertTrue(tx.verify())
 
     def test_verify_p2sh_p2wsh(self):
-        tx = TxFetcher.fetch('954f43dbb30ad8024981c07d1f5eb6c9fd461e2cf1760dd1283f052af746fc88', testnet=True)
+        tx = TxStore.fetch('954f43dbb30ad8024981c07d1f5eb6c9fd461e2cf1760dd1283f052af746fc88', testnet=True)
         self.assertTrue(tx.verify())
 
     def test_verify_if(self):
-        tx = TxFetcher.fetch('61ba3a8b40706931b72929628cf1a07d604f158c8350055725c664d544d00030', testnet=True)
+        tx = TxStore.fetch('61ba3a8b40706931b72929628cf1a07d604f158c8350055725c664d544d00030', testnet=True)
         self.assertTrue(tx.verify())
 
     def test_verify_cltv(self):
-        tx = TxFetcher.fetch('ca2c7347aa2fdff68052f026fa9a092448c2451f774ca53f3a2b05d74405addc', testnet=True)
+        tx = TxStore.fetch('ca2c7347aa2fdff68052f026fa9a092448c2451f774ca53f3a2b05d74405addc', testnet=True)
         self.assertTrue(tx.verify())
 
     def test_verify_csv(self):
-        tx = TxFetcher.fetch('d208b659eaca2640f732b07b11ea9800c1a0bb4ffdc03aaf82af76c1787570ac', testnet=True)
+        tx = TxStore.fetch('d208b659eaca2640f732b07b11ea9800c1a0bb4ffdc03aaf82af76c1787570ac', testnet=True)
         self.assertTrue(tx.verify())
 
     def test_verify_csv_2(self):
-        tx = TxFetcher.fetch('807d464fff227ce98cfb5f1292069e2793e99f21b0539a1729cc460af32add77', testnet=True)
+        tx = TxStore.fetch('807d464fff227ce98cfb5f1292069e2793e99f21b0539a1729cc460af32add77', testnet=True)
         self.assertTrue(tx.verify())
 
     def test_verify_lightning_local_success(self):
-        tx = TxFetcher.fetch('0191535bfda21f5dfec1c904775c5e2fbee8a985815c88d77258a0b42dba3526')
+        tx = TxStore.fetch('0191535bfda21f5dfec1c904775c5e2fbee8a985815c88d77258a0b42dba3526')
         self.assertTrue(tx.verify())
 
     def test_verify_lightning_local_penalty(self):
-        tx = TxFetcher.fetch('0da5e5dba5e793d50820c2275dab74912b121c8b7e34ce32a9dbfd4567a9bf8e')
+        tx = TxStore.fetch('0da5e5dba5e793d50820c2275dab74912b121c8b7e34ce32a9dbfd4567a9bf8e')
         self.assertTrue(tx.verify())
 
     def test_verify_lightning_sender_timeout(self):
-        tx = TxFetcher.fetch('a16f6d78a58d31fe7459887adf5bd6b4dd95277ea375d250c700cde9fa908bdb')
+        tx = TxStore.fetch('a16f6d78a58d31fe7459887adf5bd6b4dd95277ea375d250c700cde9fa908bdb')
         self.assertTrue(tx.verify())
 
     def test_verify_lightning_sender_preimage(self):
-        tx = TxFetcher.fetch('89c744f0806a57a9b4634c320703cc941aaf272f290296373b709499064335e5')
+        tx = TxStore.fetch('89c744f0806a57a9b4634c320703cc941aaf272f290296373b709499064335e5')
         self.assertTrue(tx.verify())
 
     def test_verify_lightning_receiver_timeout(self):
-        tx = TxFetcher.fetch('f9af9b93d66c7e5ee7dcbe0b53faa3d17aa6b9f4cc5b19f0985917b57d82c59a')
+        tx = TxStore.fetch('f9af9b93d66c7e5ee7dcbe0b53faa3d17aa6b9f4cc5b19f0985917b57d82c59a')
         self.assertTrue(tx.verify())
 
     def test_verify_lightning_receiver_preimage(self):
-        tx = TxFetcher.fetch('36b1aff2ad0076be95b1ee1dc4036374998760c80c6583a6478a699e86658ac0')
+        tx = TxStore.fetch('36b1aff2ad0076be95b1ee1dc4036374998760c80c6583a6478a699e86658ac0')
         self.assertTrue(tx.verify())
 
     def test_verify_sha1_pinata(self):
-        tx = TxFetcher.fetch('8d31992805518fd62daa3bdd2a5c4fd2cd3054c9b3dca1d78055e9528cff6adc')
+        tx = TxStore.fetch('8d31992805518fd62daa3bdd2a5c4fd2cd3054c9b3dca1d78055e9528cff6adc')
         self.assertTrue(tx.verify())
 
     def test_verify_weird(self):
@@ -803,10 +826,9 @@ class TxTest(TestCase):
             'dc3aad51b4b9ea1ef40755a38b0b4d6e08c72d2ac5e95b8bebe9bd319b6aed7e',
         )
         for tx_id in tx_ids:
-            tx = TxFetcher.fetch(tx_id, testnet=True, fresh=True)
+            tx = TxStore.fetch(tx_id, testnet=True)
             tx.bip112 = False
             tx.bip65 = False
-            print(tx_id)
             self.assertTrue(tx.verify())
 
     def test_sign_input_p2pkh(self):
@@ -823,13 +845,13 @@ class TxTest(TestCase):
         self.assertTrue(tx.sign_input_p2pkh(0, private_key))
 
     def test_is_coinbase(self):
-        tx = TxFetcher.fetch('51bdce0f8a1edd5bc023fd4de42edb63478ca67fc8a37a6e533229c17d794d3f')
+        tx = TxStore.fetch('51bdce0f8a1edd5bc023fd4de42edb63478ca67fc8a37a6e533229c17d794d3f')
         self.assertTrue(tx.is_coinbase())
 
     def test_coinbase_height(self):
-        tx = TxFetcher.fetch('51bdce0f8a1edd5bc023fd4de42edb63478ca67fc8a37a6e533229c17d794d3f')
+        tx = TxStore.fetch('51bdce0f8a1edd5bc023fd4de42edb63478ca67fc8a37a6e533229c17d794d3f')
         self.assertEqual(tx.coinbase_height(), 465879)
-        tx = TxFetcher.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
+        tx = TxStore.fetch('452c629d67e41baec3ac6f04fe744b4b9617f8f859c63b3002f8684e7a4fee03')
         self.assertIsNone(tx.coinbase_height())
 
     def test_p2sh_multisig(self):

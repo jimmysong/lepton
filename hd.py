@@ -100,51 +100,29 @@ class HDPrivateKey:
         return root.traverse(path)
 
     @classmethod
-    def generate(cls, password=b'', testnet=False):
-        mnemonic = secure_mnemonic()
+    def generate(cls, password=b'', entropy=0, testnet=False):
+        mnemonic = secure_mnemonic(entropy=entropy)
         return mnemonic, cls.from_mnemonic(mnemonic, password=password, testnet=testnet)
 
     @classmethod
     def from_mnemonic(cls, mnemonic, password=b'', path=b'm', testnet=False):
         binary_seed = bytearray()
-        offset = 0
         words = mnemonic.split()
         if len(words) not in (12, 15, 18, 21, 24):
-            raise RuntimeError('you need 12, 15, 18, 21, or 24 words')
+            raise ValueError('you need 12, 15, 18, 21, or 24 words')
+        number = 0
         for word in words:
             index = WORD_LOOKUP[word]
-            remaining = 11
-            while remaining > 0:
-                bits_needed = 8 - offset
-                if remaining == bits_needed:
-                    if bits_needed == 8:
-                        binary_seed.append(index)
-                    else:
-                        binary_seed[-1] |= index
-                    offset = 0
-                    remaining = 0
-                elif remaining > bits_needed:
-                    if bits_needed == 8:
-                        binary_seed.append(index >> (remaining - 8))
-                    else:
-                        binary_seed[-1] |= index >> (remaining - bits_needed)
-                    remaining -= bits_needed
-                    offset = 0
-                    # lop off the top 8 bits
-                    index &= (1 << remaining) - 1
-                else:
-                    binary_seed.append(index << (8 - remaining))
-                    offset = remaining
-                    remaining = 0
-        checksum_length_bits = len(words)*11 // 33
-        bits_to_ignore = (8 - checksum_length_bits) % 8
-        raw = bytes(binary_seed)
-        data, checksum = raw[:-1], raw[-1]
-        computed_checksum = sha256(data)[0]
-        # ignore the last bits_to_ignore bits
-        computed_checksum &= (1 << 8) - (1 << bits_to_ignore)
+            number = (number << 11) + index
+        # checksum is the last n bits where n = (# of words / 3)
+        checksum_bits_length = len(words) // 3
+        checksum = number & ((1 << checksum_bits_length) - 1)
+        bits_to_ignore = (8 - checksum_bits_length) % 8
+        data_num = number >> checksum_bits_length
+        data = data_num.to_bytes(checksum_bits_length * 4, 'big')
+        computed_checksum = sha256(data)[0] >> bits_to_ignore
         if checksum != computed_checksum:
-            raise RuntimeError('words fail checksum: {}'.format(words))
+            raise ValueError('words fail checksum: {}'.format(words))
         normalized_words = []
         for word in words:
             normalized_words.append(WORD_LIST[WORD_LOOKUP[word]])
@@ -160,10 +138,7 @@ class HDPrivateKey:
 
     def traverse(self, path):
         current = self
-        if path.startswith(b'm'):
-            components = path.split(b'/')[1:]
-        else:
-            components = path.split(b'/')
+        components = path.split(b'/')[1:]
         for child in components:
             if child.endswith(b"'"):
                 hardened = True
@@ -183,7 +158,7 @@ class HDPrivateKey:
         elif version in (MAINNET_XPRV, MAINNET_YPRV, MAINNET_ZPRV):
             testnet = False
         else:
-            raise RuntimeError('not an xprv, yprv or zprv: {}'.format(version.hex()))
+            raise ValueError('not an xprv, yprv or zprv: {}'.format(version))
         depth = raw[4]
         fingerprint = raw[5:9]
         child_number = int.from_bytes(raw[9:13], 'big')
@@ -240,9 +215,6 @@ class HDPrivateKey:
     def bech32_address(self):
         return self.pub.bech32_address()
 
-    def h160(self):
-        return self.pub.point.h160()
-
 
 class HDPublicKey:
 
@@ -298,7 +270,7 @@ class HDPublicKey:
         elif version in (MAINNET_XPUB, MAINNET_YPUB, MAINNET_ZPUB):
             testnet = False
         else:
-            raise RuntimeError('not an xpub, ypub or zpub: {}'.format(version.hex()))
+            raise ValueError('not an xpub, ypub or zpub: {}'.format(version))
         depth = raw[4]
         fingerprint = raw[5:9]
         child_number = int.from_bytes(raw[9:13], 'big')
@@ -336,9 +308,11 @@ class HDPublicKey:
             testnet=self.testnet,
         )
 
-    def script_pubkey(self):
-        h160 = self.point.hash160()
-        return p2wpkh_script(h160)
+    def p2wpkh_script_pubkey(self):
+        return p2wpkh_script(self.hash160())
+
+    def hash160(self):
+        return self.point.hash160()
 
     def address(self):
         return self.point.address(testnet=self.testnet)
@@ -560,6 +534,7 @@ class HDTest(TestCase):
                 public_key = HDPublicKey.parse(BytesIO(xpub))
                 self.assertEqual(private_key.xprv().encode('ascii'), xprv)
                 self.assertEqual(private_key.xpub(), public_key.xpub())
+                self.assertEqual(private_key.address(), public_key.address())
 
     def test_bip49(self):
         mnemonic = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
@@ -571,13 +546,16 @@ class HDTest(TestCase):
         account0 = hd_private_key.child(49, True).child(1, True).child(0, True)
         want = 'tprv8gRrNu65W2Msef2BdBSUgFdRTGzC8EwVXnV7UGS3faeXtuMVtGfEdidVeGbThs4ELEoayCAzZQ4uUji9DUiAs7erdVskqju7hrBcDvDsdbY'
         self.assertEqual(account0.xprv(), want)
+        account0_pub = account0.pub
         account0_first_key = account0.child(0, False).child(0, False)
+        pub_first_key = account0_pub.traverse(b'/0/0')
         want = 'cULrpoZGXiuC19Uhvykx7NugygA3k86b3hmdCeyvHYQZSxojGyXJ'
         self.assertEqual(account0_first_key.wif(), want)
         want = 0xc9bdb49cfbaedca21c4b1f3a7803c34636b1d7dc55a717132443fc3f4c5867e8
         self.assertEqual(account0_first_key.private_key.secret, want)
         want = bytes.fromhex('03a1af804ac108a8a51782198c2d034b28bf90c8803f5a53f76276fa69a4eae77f')
         self.assertEqual(account0_first_key.private_key.point.sec(), want)
+        self.assertEqual(pub_first_key.address(), account0_first_key.address())
 
     def test_bech32_address(self):
         mnemonic = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
@@ -592,5 +570,45 @@ class HDTest(TestCase):
         want = 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu'
         self.assertEqual(first_key.bech32_address(), want)
 
-    def test_generate(self):
-        HDPrivateKey.generate()
+    def test_zprv(self):
+        mnemonic, priv = HDPrivateKey.generate(entropy=1<<128)
+        for word in mnemonic.split():
+            self.assertTrue(word in WORD_LIST)
+        zprv = priv.zprv()
+        self.assertTrue(zprv.startswith('zprv'))
+        zpub = priv.pub.zpub()
+        self.assertTrue(zpub.startswith('zpub'))
+        derived = HDPrivateKey.parse(BytesIO(zprv.encode('ascii')))
+        self.assertEqual(zprv, derived.zprv())
+        mnemonic, priv = HDPrivateKey.generate(testnet=True)
+        zprv = priv.zprv()
+        self.assertEqual(zprv.encode('ascii'), priv.serialize())
+        self.assertTrue(zprv.startswith('vprv'))
+        zpub = priv.pub.zpub()
+        self.assertEqual(zpub.encode('ascii'), priv.pub.serialize())
+        self.assertTrue(zpub.startswith('vpub'))
+        xpub = priv.pub.xpub()
+        self.assertTrue(xpub.startswith('tpub'))
+        derived = HDPrivateKey.parse(BytesIO(zprv.encode('ascii')))
+        self.assertEqual(zprv, derived.zprv())
+        derived_pub = HDPublicKey.parse(BytesIO(zpub.encode('ascii')))
+        self.assertEqual(zpub, derived_pub.zpub())
+        self.assertTrue(derived_pub.p2wpkh_script_pubkey().is_p2wpkh_script_pubkey())
+        with self.assertRaises(ValueError):
+            bad_zprv = encode_base58_checksum(b'\x00' * 78)
+            HDPrivateKey.parse(BytesIO(bad_zprv.encode('ascii')))
+        with self.assertRaises(ValueError):
+            bad_zpub = encode_base58_checksum(b'\x00' * 78)
+            HDPublicKey.parse(BytesIO(bad_zpub.encode('ascii')))
+        with self.assertRaises(ValueError):
+            priv.child(1 << 58)
+        with self.assertRaises(ValueError):
+            derived_pub.child(1 << 58)
+
+    def test_errors(self):
+        with self.assertRaises(ValueError):
+            HDPrivateKey.from_mnemonic('hello')
+        with self.assertRaises(ValueError):
+            mnemonic = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon'
+            HDPrivateKey.from_mnemonic(mnemonic)
+        

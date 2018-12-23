@@ -95,7 +95,8 @@ def raw_decode_base58(s, num_bytes):
     combined = num.to_bytes(num_bytes, 'big')
     checksum = combined[-4:]
     if hash256(combined[:-4])[:4] != checksum:
-        raise RuntimeError('bad checksum {} != {}'.format(hash256(combined[:-4])[:4].hex(), checksum.hex()))
+        raise ValueError('bad checksum {} != {}'.format(
+            hash256(combined[:-4])[:4].hex(), checksum.hex()))
     return combined[:-4]
 
 
@@ -174,28 +175,21 @@ def decode_bech32(s):
     hrp, raw_data = s.encode('ascii').split(b'1')
     data = [BECH32_ALPHABET.index(c) for c in raw_data]
     if not bech32_verify_checksum(hrp, data):
-        raise RuntimeError('bad address: {}'.format(s))
+        raise ValueError('bad address: {}'.format(s))
     version = data[0]
-    current = 0
-    unused_bits = 0
-    witness = bytearray()
+    number = 0
     for digit in data[1:-6]:
-        unused_bits += 5
-        current = current * 32 + digit
-        if unused_bits >= 8:
-            unused_bits -= 8
-            witness.append(current >> unused_bits)
-            mask = (1 << unused_bits) - 1
-            current &= mask
-    if current != 0:
-        raise RuntimeError('unneeded extra data: {}'.format(current))
+        number = (number << 5) + digit
+    num_bytes = (len(data) - 7) * 5 // 8
+    bits_to_ignore = (len(data) - 7) * 5 % 8
+    number >>= bits_to_ignore
+    witness = number.to_bytes(num_bytes, 'big')
     if version == 0:
         version_byte = b'\x00'
     else:
         version_byte = encode_varint(version + 0x50)
-    num_bytes = len(witness)
     if num_bytes < 2 or num_bytes > 40:
-        raise RuntimeError('bytes out of range: {}'.format(num_bytes))
+        raise ValueError('bytes out of range: {}'.format(num_bytes))
     length_byte = encode_varint(num_bytes)
     return version_byte + length_byte + bytes(witness)
 
@@ -228,7 +222,7 @@ def encode_varint(i):
     elif i < 0x10000000000000000:
         return b'\xff' + int_to_little_endian(i, 8)
     else:
-        raise RuntimeError('integer too large: {}'.format(i))
+        raise ValueError('integer too large: {}'.format(i))
 
 
 def h160_to_p2pkh_address(h160, testnet=False):
@@ -551,6 +545,8 @@ class HelperTest(TestCase):
         self.assertEqual(h160, want)
         got = encode_base58_checksum(b'\x6f' + bytes.fromhex(h160))
         self.assertEqual(got, addr)
+        with self.assertRaises(ValueError):
+            decode_base58(addr[:1] + 'e')
 
     def test_bech32(self):
         addr = 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4'
@@ -571,7 +567,19 @@ class HelperTest(TestCase):
         self.assertEqual(witness, want)
         got = encode_bech32_checksum(bytes.fromhex(want), testnet=True)
         self.assertEqual(got, addr)
+        with self.assertRaises(ValueError):
+            decode_bech32(addr[:-2] + '00')
+        with self.assertRaises(ValueError):
+            decode_bech32(encode_bech32_checksum(b'\x00' * 41))
 
+    def test_varint(self):
+        for number in (0, 250, 254, 555, 1 << 16, 1 << 32):
+            b = encode_varint(number)
+            computed = read_varint(BytesIO(b))
+            self.assertEqual(number, computed)
+        with self.assertRaises(ValueError):
+            encode_varint(1 << 64)
+            
     def test_p2pkh_address(self):
         h160 = bytes.fromhex('74d691da1574e6b3c192ecfb52cc8984ee7b6c56')
         want = '1BenRpVUFK65JFWcQSuHnJKzc4M8ZP8Eqa'
@@ -589,8 +597,21 @@ class HelperTest(TestCase):
     def test_calculate_new_bits(self):
         prev_bits = bytes.fromhex('54d80118')
         time_differential = 302400
-        want = bytes.fromhex('00157617')
-        self.assertEqual(calculate_new_bits(prev_bits, time_differential), want)
+        want = '00157617'
+        new_bits = calculate_new_bits(prev_bits, time_differential)
+        self.assertEqual(new_bits.hex(), want)
+        want ='50610718'
+        new_bits = calculate_new_bits(prev_bits, 2016*10*60*5)
+        self.assertEqual(new_bits.hex(), want)
+        want ='2aec0018'
+        new_bits = calculate_new_bits(prev_bits, 2016*10*60//2)
+        self.assertEqual(new_bits.hex(), want)
+        want ='00157617'
+        new_bits = calculate_new_bits(prev_bits, 2016*10*60//5)
+        self.assertEqual(new_bits.hex(), want)
+        want = bytes.fromhex('ffff001d')
+        new_bits = calculate_new_bits(want, 2016*10*60*2)
+        self.assertEqual(new_bits.hex(), want.hex())
 
     def test_merkle_parent(self):
         tx_hash0 = bytes.fromhex('c117ea8ec828342f4dfb0ad6bd140e03a50720ece40169ee38bdc15d9eb64cf5')
@@ -623,6 +644,8 @@ class HelperTest(TestCase):
         ]
         want_tx_hashes = [bytes.fromhex(x) for x in want_hex_hashes]
         self.assertEqual(merkle_parent_level(tx_hashes), want_tx_hashes)
+        with self.assertRaises(RuntimeError):
+            merkle_parent_level([b'\x00' * 32])
 
     def test_merkle_root(self):
         hex_hashes = [
@@ -649,6 +672,8 @@ class HelperTest(TestCase):
         want = '4000600a080000010940'
         self.assertEqual(bit_field_to_bytes(bit_field).hex(), want)
         self.assertEqual(bytes_to_bit_field(bytes.fromhex(want)), bit_field)
+        with self.assertRaises(RuntimeError):
+            bit_field_to_bytes([0])
 
     def test_siphash(self):
         zero_key = b'\x00' * 16
@@ -668,6 +693,8 @@ class HelperTest(TestCase):
         result = siphash(test_key, b'\x00')
         want = 0x74f839c593dc67fd
         self.assertEqual(result, want)
+        with self.assertRaises(ValueError):
+            siphash(b'\x00' * 4, b'\x00')
 
     def test_golomb(self):
         tests = (
