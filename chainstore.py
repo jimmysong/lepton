@@ -38,9 +38,9 @@ class BlockStore:
         self.testnet = node.testnet
         if filename is None:
             if self.testnet:
-                self.filename = 'blocks.testnet'
+                self.filename = 'testnet.blocks'
             else:
-                self.filename = 'blocks.mainnet'
+                self.filename = 'mainnet.blocks'
         else:
             self.filename = filename
         self.full = full
@@ -72,16 +72,23 @@ class BlockStore:
                     header.cfhash = f.read(32)
                     headers.append(header)
                 self.headers = headers[::-1]
+        self.headers_lookup = {h.hash(): h for h in self.headers}
 
     def store_height(self):
         '''return the height of the last block we have'''
         return self.start_height + len(self.headers) - 1
 
-    def header_at_height(self, height):
+    def header_by_height(self, height):
         index = height - self.start_height
         if index >= len(self.headers) or index < 0:
             raise RuntimeError('Block {} not in store'.format(height))
         return self.headers[index]
+
+    def header_by_hash(self, h):
+        header = self.headers_lookup.get(h)
+        if header is None:
+            raise RuntimeError('Block {} not in store'.format(h))
+        return header
         
     def save(self):
         store_height = self.store_height()
@@ -98,7 +105,7 @@ class BlockStore:
         with open(self.filename, 'wb') as f:
             f.write(encode_varint(store_height))
             for height in range(store_height, file_height, -1):
-                h = self.header_at_height(height)
+                h = self.header_by_height(height)
                 f.write(h.serialize())
                 f.write(h.cfheader)
                 f.write(h.cfhash)
@@ -143,6 +150,7 @@ class BlockStore:
                 previous = header
                 current_height += 1
                 self.headers.append(header)
+                self.headers_lookup[header.hash()] = header
                 if current_height > stop_height:
                     break
         LOGGER.info('downloaded headers to {} inclusive'.format(stop_height))
@@ -166,7 +174,7 @@ class BlockStore:
                 end = stop_height
                 stop_hash = self.headers[-1].hash()
             else:
-                stop_hash = self.header_at_height(end).hash()
+                stop_hash = self.header_by_height(end).hash()
             LOGGER.info('getting filters range {} to {}'.format(start, end))
             getcfheaders = GetCFHeadersMessage(
                 start_height=start, stop_hash=stop_hash)
@@ -176,7 +184,7 @@ class BlockStore:
                 raise RuntimeError('Non-sequential CF headers')
             # validate all cfheaders
             for j, filter_hash in enumerate(cfheaders.filter_hashes):
-                header = self.header_at_height(start + j)
+                header = self.header_by_height(start + j)
                 filter_header = hash256(filter_hash[::-1] + prev_filter_header[::-1])[::-1]
                 prev_filter_header = filter_header
                 header.cfhash = filter_hash
@@ -188,7 +196,7 @@ class BlockStore:
 class BlockStoreTest(TestCase):
 
     def test_load(self):
-        filename = 'tmp.mainnet'
+        filename = 'mainnet.blocks.tmp'
         if exists(filename):
             unlink(filename)
         height = 4032
@@ -212,7 +220,7 @@ class BlockStoreTest(TestCase):
         self.assertEqual(new_cs.store_height(), height)
         new_cs.save()
         unlink(filename)
-        filename = 'tmp.testnet'
+        filename = 'testnet.blocks.tmp'
         if exists(filename):
             unlink(filename)
         height = 4032

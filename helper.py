@@ -225,6 +225,15 @@ def encode_varint(i):
         raise ValueError('integer too large: {}'.format(i))
 
 
+def read_varstr(s):
+    item_length = read_varint(s)
+    return s.read(item_length)
+
+
+def encode_varstr(b):
+    return encode_varint(len(b)) + b
+
+
 def h160_to_p2pkh_address(h160, testnet=False):
     '''Takes a byte sequence hash160 and returns a p2pkh address string'''
     # p2pkh has a prefix of b'\x00' for mainnet, b'\x6f' for testnet

@@ -14,7 +14,9 @@ from block import Block
 from chainstore import BlockStore
 from hd import HDPrivateKey, HDPublicKey
 from helper import (
+    encode_gcs,
     encode_varint,
+    filter_null,
     hash256,
     int_to_little_endian,
     little_endian_to_int,
@@ -132,7 +134,7 @@ class EncryptedPrivateKey:
     def unlock(self):
         for i in range(5):
             # prompt for a password
-            password = getpass.getpass().encode('ascii')
+            password = getpass.getpass(prompt='Password: ').encode('ascii')
             cipher = self.cipher(self.salt, password)
             zprv = cipher.decrypt(self.encrypted_data)
             try:
@@ -169,7 +171,7 @@ class EncryptedPrivateKey:
 
     @classmethod
     def generate(cls, testnet=False):
-        password = getpass.getpass().encode('ascii')
+        password = getpass.getpass(prompt='New Password: ').encode('ascii')
         salt = token_bytes(32)
         cipher = cls.cipher(salt, password)
         mnemonic, private_key = HDPrivateKey.generate(testnet=testnet)
@@ -183,7 +185,7 @@ class EncryptedPrivateKey:
     @classmethod
     def from_mnemonic(cls, mnemonic, testnet=False):
         private_key = HDPrivateKey.from_mnemonic(mnemonic, testnet=testnet)
-        password = getpass.getpass().encode('ascii')
+        password = getpass.getpass(prompt='New Password: ').encode('ascii')
         salt = token_bytes(32)
         cipher = cls.cipher(salt, password)
         plaintext = private_key.zprv().encode('ascii')
@@ -211,12 +213,17 @@ class Wallet:
         self.node = SimpleNode(host='192.168.1.200', testnet=self.testnet)
         self.block_store = BlockStore(node=self.node, include=self.sync_height)
         sleep(1)
-        if not self.sync_height:
+        if not self.creation_height:
             # this is a new wallet
             self.creation_height = self.sync_height = self.node.latest_block
 
     @classmethod
-    def create(cls, filename='wallet.data', testnet=False):
+    def create(cls, filename=None, testnet=False):
+        if filename is None:
+            if testnet:
+                filename = 'testnet.wallet'
+            else:
+                filename = 'mainnet.wallet'
         if isfile(filename):
             raise RuntimeError('file exists: {}'.format(filename))
         mnemonic, encrypted_private = EncryptedPrivateKey.generate(testnet)
@@ -231,7 +238,12 @@ class Wallet:
         return mnemonic, wallet
 
     @classmethod
-    def recover(cls, mnemonic, filename='wallet.data', testnet=False):
+    def recover(cls, mnemonic, filename=None, testnet=False):
+        if filename is None:
+            if testnet:
+                filename = 'testnet.wallet'
+            else:
+                filename = 'mainnet.wallet'
         if isfile(filename):
             raise RuntimeError('file exists: {}'.format(filename))
         encrypted_private = EncryptedPrivateKey.from_mnemonic(mnemonic, testnet)
@@ -248,7 +260,7 @@ class Wallet:
         return wallet
         
     @classmethod
-    def open(cls, filename='wallet.data'):
+    def open(cls, filename='testnet.wallet'):
         if not isfile(filename):
             raise RuntimeError('No such file {}'.format(filename))
         with open(filename, 'rb') as f:
@@ -318,11 +330,15 @@ class Wallet:
         self.block_store.update()
         if height is None:
             height = self.sync_height
+        block_hashes = self.get_relevant_block_hashes(height)
+        self.scan_blocks(block_hashes)
+
+    def get_relevant_block_hashes(self, height):
         # start from height, download the compact filters
         num_requests, r = divmod(self.block_store.store_height() - height, 1000)
         if r > 0:
             num_requests += 1
-        getdata = GetDataMessage()
+        block_hashes = []
         script_pubkey_lookup = self.script_pubkey_lookup()
         LOGGER.info('scanning blocks for relevant transactions')
         for i in range(num_requests):
@@ -331,7 +347,7 @@ class Wallet:
                 end_height = self.block_store.store_height()
             else:
                 end_height = height + (i+1)*1000 - 1
-            stop_hash = self.block_store.header_at_height(end_height).hash()
+            stop_hash = self.block_store.header_by_height(end_height).hash()
             LOGGER.info('scanning from {} to {}'.format(start_height, end_height))
             getcfilters = GetCFiltersMessage(
                 start_height=start_height,
@@ -340,39 +356,43 @@ class Wallet:
             self.node.send(getcfilters)
             for h in range(start_height, end_height+1):
                 cfilter = self.node.wait_for(CFilterMessage)
-                header = self.block_store.header_at_height(h)
+                header = self.block_store.header_by_height(h)
                 if header.hash() != cfilter.block_hash:
                     raise RuntimeError('bad block')
                 computed = hash256(cfilter.filter_bytes)[::-1]
                 if computed != header.cfhash:
                     raise RuntimeError('not the right cf hash')
                 if script_pubkey_lookup.keys() in cfilter:
-                    LOGGER.info('interesting block {}'.format(h))
-                    getdata.add(BLOCK_DATA_TYPE, cfilter.block_hash)
+                    LOGGER.info('interesting block {}: {}'.format(h, header.id()))
+                    block_hashes.append(cfilter.block_hash)
+        return block_hashes
+
+    def scan_blocks(self, block_hashes):
+        script_pubkey_lookup = self.script_pubkey_lookup()
         # download the blocks we know are interesting
-        self.node.send(getdata)
-        for _, block_hash in getdata.data:
-            b = self.node.wait_for(Block)
-            if b.hash() != block_hash:
-                raise RuntimeError('wrong block sent')
+        for h, b in self.node.get_blocks(block_hashes):
+            if h != b.hash():
+                raise RuntimeError('bad block: {} vs {}'.format(h.hex(), b.id()))
             for tx_obj in b.txs:
                 add_tx = False
                 tx_hash = tx_obj.hash()
-                for i, tx_in in enumerate(tx_obj.tx_ins):
-                    # if this transaction has a utxo as an input (spending)
-                    key = (tx_in.prev_tx, tx_in.prev_index)
-                    if self.utxo_lookup.get(key):
-                        utxo = self.utxo_lookup.pop(key)
-                        self.stxo_lookup[(tx_hash, i)] = STXO(utxo.txo, tx_hash, i)
-                        add_tx = True
+                if not tx_obj.is_coinbase():
+                    for i, tx_in in enumerate(tx_obj.tx_ins):
+                        # if this transaction has a utxo as an input (spending)
+                        key = (tx_in.prev_tx, tx_in.prev_index)
+                        if self.utxo_lookup.get(key):
+                            add_tx = True
+                            utxo = self.utxo_lookup.pop(key)
+                            self.stxo_lookup[key] = STXO(utxo.txo, tx_hash, i)
                 for i, tx_out in enumerate(tx_obj.tx_outs):
                     # if this transaction has an output that's ours (receiving)
                     raw_script_pubkey = tx_out.script_pubkey.raw_serialize()
                     if raw_script_pubkey in script_pubkey_lookup.keys():
-                        txo = TXO(tx_hash, i, tx_out.amount,
-                                  tx_out.script_pubkey, script_pubkey_lookup[raw_script_pubkey])
-                        self.utxo_lookup[(tx_hash, i)] = UTXO(txo)
                         add_tx = True
+                        txo = TXO(
+                            tx_hash, i, tx_out.amount, tx_out.script_pubkey,
+                            script_pubkey_lookup[raw_script_pubkey])
+                        self.utxo_lookup[key] = UTXO(txo)
                 if add_tx:
                     LOGGER.info('interesting tx {}'.format(tx_obj.id()))
                     self.tx_store.add(tx_obj)
@@ -453,3 +473,15 @@ class WalletTest(TestCase):
         unlink(filename)
         w3 = Wallet.recover(mnemonic, filename=filename, testnet=True)
         self.assertEqual(w.public.zpub(), w3.public.zpub())
+
+    @patch('getpass.getpass')
+    def test_existing(self, gp):
+        gp.return_value = 'ok123'
+        filename = 'unittest.wallet'
+        w = Wallet.open(filename=filename)
+        self.assertTrue(w.testnet)
+        self.assertEqual(len(w.utxo_lookup), 3)
+        self.assertEqual(len(w.stxo_lookup), 3)
+        w.save()
+        w.update(1449552)
+

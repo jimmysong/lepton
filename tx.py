@@ -11,10 +11,12 @@ from helper import (
     decode_bech32,
     hash256,
     encode_varint,
+    encode_varstr,
     hash160,
     int_to_little_endian,
     little_endian_to_int,
     read_varint,
+    read_varstr,
     SIGHASH_ALL,
 )
 from script import (
@@ -55,9 +57,9 @@ class TxStore:
         self.testnet = testnet
         if filename is None:
             if testnet:
-                self.filename = 'txs.testnet'
+                self.filename = 'testnet.txs'
             else:
-                self.filename = 'txs.mainnet'
+                self.filename = 'mainnet.txs'
         else:
             self.filename = filename
         self.node = None
@@ -186,12 +188,8 @@ class Tx:
             num_items = read_varint(s)
             items = []
             for _ in range(num_items):
-                item_len = read_varint(s)
-                if item_len == 0:
-                    items.append(0)
-                else:
-                    items.append(s.read(item_len))
-            tx_in.witness_program = items
+                items.append(read_varstr(s))
+            tx_in.witness = items
         # locktime is 4 bytes, little-endian
         locktime = little_endian_to_int(s.read(4))
         # return an instance of the class (cls(...))
@@ -243,12 +241,12 @@ class Tx:
             result += tx_out.serialize()
         # add the witness data
         for tx_in in self.tx_ins:
-            result += int_to_little_endian(len(tx_in.witness_program), 1)
-            for item in tx_in.witness_program:
+            result += encode_varint(len(tx_in.witness))
+            for item in tx_in.witness:
                 if type(item) == int:
                     result += int_to_little_endian(item, 1)
                 else:
-                    result += encode_varint(len(item)) + item
+                    result += encode_varstr(item)
         # serialize locktime (4 bytes, little endian)
         result += int_to_little_endian(self.locktime, 4)
         return result
@@ -362,26 +360,26 @@ class Tx:
             redeem_script = Script.parse(BytesIO(raw_redeem))
             if redeem_script.is_p2wpkh_script_pubkey():
                 z = self.sig_hash_bip143(input_index, redeem_script)
-                witness = tx_in.witness_program
+                witness = tx_in.witness
             elif redeem_script.is_p2wsh_script_pubkey():
-                instruction = tx_in.witness_program[-1]
-                raw_witness = encode_varint(len(instruction)) + instruction
+                instruction = tx_in.witness[-1]
+                raw_witness = encode_varstr(instruction)
                 witness_script = Script.parse(BytesIO(raw_witness))
                 z = self.sig_hash_bip143(input_index, witness_script=witness_script)
-                witness = tx_in.witness_program
+                witness = tx_in.witness
             else:
                 z = self.sig_hash(input_index, redeem_script)
                 witness = None
         else:
             if script_pubkey.is_p2wpkh_script_pubkey():
                 z = self.sig_hash_bip143(input_index)
-                witness = tx_in.witness_program
+                witness = tx_in.witness
             elif script_pubkey.is_p2wsh_script_pubkey():
-                instruction = tx_in.witness_program[-1]
-                raw_witness = encode_varint(len(instruction)) + instruction
+                instruction = tx_in.witness[-1]
+                raw_witness = encode_varstr(instruction)
                 witness_script = Script.parse(BytesIO(raw_witness))
                 z = self.sig_hash_bip143(input_index, witness_script=witness_script)
-                witness = tx_in.witness_program
+                witness = tx_in.witness
             else:
                 z = self.sig_hash(input_index)
                 witness = None
@@ -448,7 +446,7 @@ class Tx:
         sec = private_key.point.sec()
         # get the input
         tx_in = self.tx_ins[input_index]
-        tx_in.witness_program = [sig, sec]
+        tx_in.witness = [sig, sec]
         # return whether sig is valid using self.verify_input
         return self.verify_input(input_index)
 
@@ -469,7 +467,7 @@ class Tx:
         tx_in = self.tx_ins[input_index]
         # change input's script_sig to the Script consisting of the redeem script
         tx_in.script_sig = Script([redeem])
-        tx_in.witness_program = [sig, sec]
+        tx_in.witness = [sig, sec]
         # return whether sig is valid using self.verify_input
         return self.verify_input(input_index)
 
@@ -489,7 +487,7 @@ class Tx:
         # finally, add the witness script to the items array
         items.append(witness_script.raw_serialize())
         # change input's script_sig to the Script consisting of the items array
-        self.tx_ins[input_index].witness_program = items
+        self.tx_ins[input_index].witness = items
         # return whether sig is valid using self.verify_input
         return self.verify_input(input_index)
 
@@ -514,7 +512,7 @@ class Tx:
         # finally, add the witness script to the items array
         items.append(witness_script.raw_serialize())
         # change input's script_sig to the Script consisting of the items array
-        tx_in.witness_program = items
+        tx_in.witness = items
         # return whether sig is valid using self.verify_input
         return self.verify_input(input_index)
 
@@ -886,8 +884,8 @@ class TxTest(TestCase):
         prev_index = 1
         fee = int(100000000*0.001)
         tx_in = TxIn(prev_tx, prev_index)
-        witness_program = decode_bech32('tb1q3845h8hm5uqgjh7jkq4pkrftlrcgvjf442jh4z')
-        h160 = witness_program[2:]
+        witness = decode_bech32('tb1q3845h8hm5uqgjh7jkq4pkrftlrcgvjf442jh4z')
+        h160 = witness[2:]
         script_pubkey = p2wpkh_script(h160)
         amount = tx_in.value(testnet=True) - fee
         tx_out = TxOut(amount, script_pubkey)

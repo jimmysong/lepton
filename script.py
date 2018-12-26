@@ -9,7 +9,7 @@ from helper import (
     decode_base58,
     decode_bech32,
     encode_bech32_checksum,
-    encode_varint,
+    encode_varstr,
     h160_to_p2pkh_address,
     h160_to_p2sh_address,
     hash160,
@@ -43,8 +43,7 @@ def address_to_script_pubkey(s):
     elif s[:3] in ('bc1', 'tb1'):
         # p2wpkh
         raw_script = decode_bech32(s)
-        prefix = encode_varint(len(raw_script))
-        return Script.parse(BytesIO(prefix+raw_script))
+        return Script.parse(BytesIO(encode_varstr(raw_script)))
     else:
         raise RuntimeError('unknown type of address: {}'.format(s))
 
@@ -245,10 +244,8 @@ class Script:
     def serialize(self):
         # get the raw serialization (no prepended length)
         result = self.raw_serialize()
-        # get the length of the whole thing
-        total = len(result)
-        # encode_varint the total length of the result and prepend
-        return encode_varint(total) + result
+        # encode_varstr, which prepends the length
+        return encode_varstr(result)
 
     def hash160(self):
         '''Return the hash160 of the serialized script (without length)'''
@@ -315,7 +312,7 @@ class Script:
                 if len(instructions) == 3 and instructions[0] == 0xa9 \
                     and type(instructions[1]) == bytes and len(instructions[1]) == 20 \
                     and instructions[2] == 0x87:
-                    redeem_script = encode_varint(len(instruction)) + instruction
+                    redeem_script = encode_varstr(instruction)
                     # we execute the next three op codes
                     instructions.pop()
                     h160 = instructions.pop()
@@ -350,7 +347,7 @@ class Script:
                         LOGGER.info('bad sha256 {} vs {}'.format(h256.hex(), sha256(witness_script).hex()))
                         return False
                     # hashes match! now add the Witness Script
-                    stream = BytesIO(encode_varint(len(witness_script)) + witness_script)
+                    stream = BytesIO(encode_varstr(witness_script))
                     witness_script_instructions = Script.parse(stream).instructions
                     instructions.extend(witness_script_instructions)
                     if DEBUG:

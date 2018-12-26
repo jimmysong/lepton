@@ -18,11 +18,13 @@ from helper import (
     decode_base58,
     decode_golomb,
     encode_varint,
+    encode_varstr,
     hash256,
     hash_to_range,
     int_to_little_endian,
     little_endian_to_int,
     read_varint,
+    read_varstr,
     unpack_bits,
 )
 from merkleblock import MerkleBlock
@@ -188,8 +190,7 @@ class VersionMessage:
         sender_ip = s.read(16)[-4:]
         sender_port = little_endian_to_int(s.read(2))
         nonce = s.read(8)
-        user_agent_length = read_varint(s)
-        user_agent = s.read(user_agent_length)
+        user_agent = read_varstr(s)
         latest_block = little_endian_to_int(s.read(4))
         relay = s.read(1) == b'\x01'
         return cls(version, services, timestamp, receiver_services,
@@ -218,9 +219,8 @@ class VersionMessage:
         result += int_to_little_endian(self.sender_port, 2)
         # nonce should be 8 bytes
         result += self.nonce
-        # useragent is a variable string, so varint first
-        result += encode_varint(len(self.user_agent))
-        result += self.user_agent
+        # useragent is a variable string
+        result += encode_varstr(self.user_agent)
         # latest block is 4 bytes little endian
         result += int_to_little_endian(self.latest_block, 4)
         # relay is 00 if false, 01 if true
@@ -610,14 +610,57 @@ class RejectMessage:
 
     @classmethod
     def parse(cls, s):
-        message_length = read_varint(s)
-        message = s.read(message_length)
+        message = read_varstr(s)
         code = s.read(1)
-        reason_length = read_varint(s)
-        reason = s.read(reason_length)
+        reason = read_varstr(s)
         return cls(message, code, reason)
-        
-            
+
+
+class RejectMessageTest(TestCase):
+
+    def test_parse(self):
+        s = BytesIO(bytes.fromhex('09736f6d657468696e670109736f6d657468696e67'))
+        rm = RejectMessage.parse(s)
+        self.assertEqual(rm.message, b'something')
+        self.assertEqual(rm.code, b'\x01')
+        self.assertEqual(rm.reason, b'something')
+        self.assertTrue('something' in rm.__repr__())
+
+
+class NotFoundMessage:
+    command = b'notfound'
+
+    def __init__(self, data):
+        self.data = data
+
+    def __repr__(self):
+        result = ''
+        for item in self.data:
+            result += '\n' + item[1].hex()
+        return result
+
+    @classmethod
+    def parse(cls, s):
+        num_items = read_varint(s)
+        data = []
+        for _ in range(num_items):
+            item_type = little_endian_to_int(s.read(4))
+            h = s.read(32)[::-1]
+            data.append((item_type, h))
+        return cls(data)
+
+
+class NotFoundMessageTest(TestCase):
+
+    def test_parse(self):
+        s = BytesIO(bytes.fromhex('01010000000000000000000000000000000000000000000000000000000000000000000000'))
+        nf = NotFoundMessage.parse(s)
+        self.assertEqual(len(nf.data), 1)
+        self.assertEqual(nf.data[0][0], 1)
+        self.assertEqual(nf.data[0][1], b'\x00' * 32)
+        self.assertTrue('0' * 64 in nf.__repr__())
+    
+
 class GenericMessage:
     def __init__(self, command, payload):
         self.command = command
@@ -702,6 +745,37 @@ class SimpleNode:
         # return the envelope parsed as a member of the right message class
         return command_to_class[command].parse(envelope.stream())
 
+    def get_items(self, hashes, data_type, received_class):
+        getdata = GetDataMessage()
+        for h in hashes:
+            getdata.add(data_type, h)
+        self.send(getdata)
+        for h in hashes:
+            message = self.wait_for(received_class, NotFoundMessage)
+            if message.command == NotFoundMessage.command:
+                yield None, None
+            else:
+                yield h, message
+
+    def get_blocks(self, hashes):
+        return self.get_items(hashes, BLOCK_DATA_TYPE, Block)
+
+    def get_filtered_block_txs(self, hashes):
+        getdata = GetDataMessage()
+        for h in hashes:
+            getdata.add(FILTERED_BLOCK_DATA_TYPE, h)
+        self.send(getdata)
+        txs = []
+        for h in hashes:
+            mb = self.wait_for(MerkleBlock)
+            if mb.header.hash() != h:
+                raise RuntimeError('unexpected block at {}'.format(h.hex))
+            valid, proved_txs = mb.check_validity()
+            if not valid:
+                raise RuntimeError('invalid block at {}'.format(h.hex))
+            for h in proved_txs:
+                yield h[::-1], self.wait_for(Tx)
+
     def send_tx(self, tx_obj):
         if tx_obj.segwit:
             return self.send_tx_segwit(tx_obj)
@@ -710,20 +784,6 @@ class SimpleNode:
 
     def send_tx_legacy(self, tx_obj):
         self.send(tx_obj)
-        # wait a sec so this message goes through with time.sleep(1)
-        time.sleep(1)
-        # now ask for this transaction from the other node
-        # create a GetDataMessage
-        getdata = GetDataMessage()
-        # ask for our transaction by adding it to the message
-        getdata.add(TX_DATA_TYPE, tx_obj.hash())
-        # send the message
-        self.send(getdata)
-        # now wait for a Tx response
-        received_tx = self.wait_for(Tx)
-        # if the received tx has the same id as our tx, we are done!
-        assert(received_tx.id() == tx_obj.id())
-        return tx_obj.id()
 
     def send_tx_segwit(self, tx_obj):
         # send an inv message with out tx
@@ -738,29 +798,15 @@ class SimpleNode:
                 LOGGER.info('sending tx: {}'.format(tx_obj.id()))
                 self.send(tx_obj)
                 break
-        # wait a sec so this message goes through with time.sleep(1)
-        time.sleep(1)
-        # now ask for this transaction from the other node
-        # create a GetDataMessage
-        getdata = GetDataMessage()
-        # ask for our transaction by adding it to the message
-        getdata.add(WITNESS_TX_DATA_TYPE, tx_obj.hash())
-        # send the message
-        self.send(getdata)
-        # now wait for a Tx or RejectMessage response
-        received = self.wait_for(Tx, RejectMessage)
-        if received.command == b'tx':
-            # if the received tx has the same id as our tx, we are done!
-            assert(received.id() == tx_obj.id())
-            return tx_obj.id()
-        else:
-            raise RuntimeError('rejected: {}'.format(received))
 
 
 class SimpleNodeTest(TestCase):
 
-    def test_handshake(self):
-        SimpleNode('testnet.programmingbitcoin.com', testnet=True, logging=True)
+    def test_get_blocks(self):
+        node = SimpleNode('testnet.programmingbitcoin.com', testnet=True, logging=True)
+        h = '00000000000000ee40c596528d9daadd030de8c538b812cf271cbebc47f9cfb5'
+        for block_hash, b in node.get_blocks([bytes.fromhex(h)]):
+            self.assertEqual(block_hash, b.hash())
 
 
 class IntegrationTest(TestCase):
@@ -777,8 +823,8 @@ class IntegrationTest(TestCase):
         last_block_hex = '00000000000000a03f9432ac63813c6710bfe41712ac5ef6faab093fe2917636'
         secret = little_endian_to_int(hash256(b'Jimmy Song'))
         private_key = PrivateKey(secret=secret)
+        h160 = private_key.point.hash160()
         addr = private_key.point.address(testnet=True)
-        h160 = decode_base58(addr)
         target_address = 'mwJn1YPMq7y5F8J3LkC5Hxg9PHyZ5K4cFv'
         target_h160 = decode_base58(target_address)
         target_script = p2pkh_script(target_h160)
@@ -798,44 +844,25 @@ class IntegrationTest(TestCase):
         node.send(getheaders)
         # wait for the headers message
         headers = node.wait_for(HeadersMessage)
-        # store the last block as None
-        last_block = None
-        # initialize the GetDataMessage
-        getdata = GetDataMessage()
-        # loop through the blocks in the headers
-        for b in headers.blocks:
-            # add a new item to the getdata message
-            # should be FILTERED_BLOCK_DATA_TYPE and block hash
-            getdata.add(FILTERED_BLOCK_DATA_TYPE, b.hash())
-            # set the last block to the current hash
-            last_block = b.hash()
-        # send the getdata message
-        node.send(getdata)
+        block_hashes = [b.hash() for b in headers.blocks]
         # initialize prev_tx, prev_index and prev_amount to None
         prev_tx, prev_index, prev_amount = None, None, None
-        # loop while prev_tx is None
-        while prev_tx is None:
-            # wait for the merkleblock or tx commands
-            message = node.wait_for(MerkleBlock, Tx)
-            # if we have the merkleblock command
-            if message.command == b'merkleblock':
-                # check that the MerkleBlock is valid
-                if not message.is_valid():
-                    raise RuntimeError('invalid merkle proof')
-            # else we have the tx command
-            else:
-                # set the tx's testnet to be True
-                message.testnet = True
-                # loop through the tx outs
-                for i, tx_out in enumerate(message.tx_outs):
-                    # if our output has the same address as our address we found it
-                    if tx_out.script_pubkey.address(testnet=True) == addr:
-                        # we found our utxo. set prev_tx, prev_index, and tx
-                        prev_tx = message.hash()
-                        prev_index = i
-                        prev_amount = tx_out.amount
-                        self.assertEqual(prev_tx.hex(), 'b2cddd41d18d00910f88c31aa58c6816a190b8fc30fe7c665e1cd2ec60efdf3f')
-                        self.assertEqual(prev_index, 7)
+        for h, tx_obj in node.get_filtered_block_txs(block_hashes):
+            self.assertEqual(h, tx_obj.hash())
+            tx_obj.testnet = True
+            # loop through the tx outs
+            for i, tx_out in enumerate(tx_obj.tx_outs):
+                # if our output has the same address as our address we found it
+                if tx_out.script_pubkey.address(testnet=True) == addr:
+                    # we found our utxo. set prev_tx, prev_index, and tx
+                    prev_tx = h
+                    prev_index = i
+                    prev_amount = tx_out.amount
+                    self.assertEqual(h.hex(), 'b2cddd41d18d00910f88c31aa58c6816a190b8fc30fe7c665e1cd2ec60efdf3f')
+                    self.assertEqual(i, 7)
+                    break
+            if prev_tx:
+                break
         # create the TxIn
         tx_in = TxIn(prev_tx, prev_index)
         # calculate the output amount (previous amount minus the fee)
