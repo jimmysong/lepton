@@ -150,12 +150,10 @@ class Block:
     def get_outpoints(self):
         if not self.txs:
             return []
-        results = []
         for t in self.txs:
             for tx_out in t.tx_outs:
                 if not tx_out.script_pubkey.has_op_return():
-                    results.append(tx_out.script_pubkey.raw_serialize())
-        return results
+                    yield (tx_out.script_pubkey.raw_serialize())
 
 
 class BlockTest(TestCase):

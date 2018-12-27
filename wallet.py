@@ -364,6 +364,7 @@ class Wallet:
                     raise RuntimeError('not the right cf hash')
                 if script_pubkey_lookup.keys() in cfilter:
                     LOGGER.info('interesting block {}: {}'.format(h, header.id()))
+                    header.cfilter = cfilter
                     block_hashes.append(cfilter.block_hash)
         return block_hashes
 
@@ -373,6 +374,10 @@ class Wallet:
         for h, b in self.node.get_blocks(block_hashes):
             if h != b.hash():
                 raise RuntimeError('bad block: {} vs {}'.format(h.hex(), b.id()))
+            header = self.block_store.header_by_hash(h)
+            for raw_script_pubkey in b.get_outpoints():
+                if raw_script_pubkey not in header.cfilter:
+                    raise RuntimeError('script_pubkeys are not in the filter')
             for tx_obj in b.txs:
                 add_tx = False
                 tx_hash = tx_obj.hash()

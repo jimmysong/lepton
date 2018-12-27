@@ -464,11 +464,14 @@ class CFilterMessage:
     def hash(self, raw_script_pubkey):
         return hash_to_range(self.key, raw_script_pubkey, self.f)
 
-    def __contains__(self, raw_script_pubkeys):
-        for raw_script_pubkey in raw_script_pubkeys:
-            if self.hash(raw_script_pubkey) in self.hashes:
-                return True
-        return False
+    def __contains__(self, raw_script_pubkey):
+        if type(raw_script_pubkey) == bytes:
+            return self.hash(raw_script_pubkey) in self.hashes
+        else:
+            for r in raw_script_pubkey:
+                if self.hash(r) in self.hashes:
+                    return True
+            return False
 
 
 class CFilterTest(TestCase):
