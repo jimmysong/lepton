@@ -381,7 +381,9 @@ class Tx:
                 z = self.sig_hash_bip143(input_index, witness_script=witness_script)
                 witness = tx_in.witness
             else:
+                print(tx_in.script_sig)
                 z = self.sig_hash(input_index)
+                print(z.to_bytes(32, 'big').hex())
                 witness = None
         # combine the current script_sig and the previous script_pubkey
         script = tx_in.script_sig + script_pubkey
@@ -816,14 +818,15 @@ class TxTest(TestCase):
 
     def test_verify_weird(self):
         tx_ids = (
-            'efdf1b981d7bba9c941295c0dfc654c4b5e40d7b9744819dd4f78b8e149898e1',
-            '9aa3a5a6d9b7d1ac9555be8e42596d06686cc5f76d259b06c560a207d310d5f5',
-            'c5d4b73af6eed28798473b05d2b227edd4f285069629843e899b52c2d1c165b7',
-            '74ea059a63c7ebddaee6805e1560b15c937d99a9ee9745412cbc6d2a0a5f5305',
+#            'efdf1b981d7bba9c941295c0dfc654c4b5e40d7b9744819dd4f78b8e149898e1',
+#            '9aa3a5a6d9b7d1ac9555be8e42596d06686cc5f76d259b06c560a207d310d5f5',
+#            'c5d4b73af6eed28798473b05d2b227edd4f285069629843e899b52c2d1c165b7',
+#            '74ea059a63c7ebddaee6805e1560b15c937d99a9ee9745412cbc6d2a0a5f5305',
             'e335562f7e297aadeed88e5954bc4eeb8dc00b31d829eedb232e39d672b0c009',
             'dc3aad51b4b9ea1ef40755a38b0b4d6e08c72d2ac5e95b8bebe9bd319b6aed7e',
         )
         for tx_id in tx_ids:
+            print(tx_id)
             tx = TxStore.fetch(tx_id, testnet=True)
             tx.bip112 = False
             tx.bip65 = False

@@ -748,7 +748,7 @@ class HelperTest(TestCase):
             key = bytes.fromhex(block_hash_hex)[::-1][:16]
             b = Block.parse(BytesIO(bytes.fromhex(full_block_hex)))
             items = filter_null(
-                [bytes.fromhex(s) for s in scripts] + b.get_outpoints())
+                [bytes.fromhex(s) for s in scripts] + [i for i in b.get_outpoints()])
             cfilter = encode_gcs(key, items)
             self.assertEqual(cfilter.hex(), cfilter_hex, notes)
             decoded_items = decode_gcs(key, cfilter)

@@ -171,7 +171,7 @@ class BlockTest(TestCase):
         self.assertEqual(block.bits, bytes.fromhex('e93c0118'))
         self.assertEqual(block.nonce, bytes.fromhex('a4ffd71d'))
         self.assertEqual(block.id(), '0000000000000000007e9e4c586439b0cdbe13b1370bdd9435d76a644d047523')
-        self.assertEqual(block.get_outpoints(), [])
+        self.assertEqual([b for b in block.get_outpoints()], [])
         self.assertTrue(block.id() in block.__repr__())
 
     def test_serialize(self):

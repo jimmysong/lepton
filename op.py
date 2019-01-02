@@ -671,7 +671,7 @@ def op_checksig(stack, z):
     # parse the serialized pubkey and signature into objects
     try:
         point = S256Point.parse(sec_pubkey)
-        sig = Signature.parse(der_signature)
+        sig = Signature(der=der_signature)
     except (ValueError, SyntaxError) as e:
         LOGGER.info(e)
         return False
@@ -710,7 +710,7 @@ def op_checkmultisig(stack, z):
         # parse all the points
         points = [S256Point.parse(sec) for sec in sec_pubkeys]
         # parse all the signatures
-        sigs = [Signature.parse(der) for der in der_signatures]
+        sigs = [Signature(der) for der in der_signatures]
         # loop through the signatures
         for sig in sigs:
             # if we have no more points, signatures are no good
@@ -782,7 +782,7 @@ class OpTest(TestCase):
     def test_op_checksig(self):
         z = 0x7c076ff316692a3d7eb3c3bb0f8b1488cf72e1afcd929e29307032997a838a3d
         sec = bytes.fromhex('04887387e452b8eacc4acfde10d9aaf7f6d9a0f975aabb10d006e4da568744d06c61de6d95231cd89026e286df3b6ae4a894a3378e393e93a0f45b666329a0ae34')
-        sig = bytes.fromhex('3045022000eff69ef2b1bd93a66ed5219add4fb51e11a840f404876325a1e8ffe0529a2c022100c7207fee197d27c618aea621406f6bf5ef6fca38681d82b2f06fddbdce6feab601')
+        sig = bytes.fromhex('3044022000eff69ef2b1bd93a66ed5219add4fb51e11a840f404876325a1e8ffe0529a2c022038df8011e682d839e75159debf909408cb3f12ae472b1d88cf6280cf01c6568b01')
         stack = [sig, sec]
         self.assertTrue(op_checksig(stack, z))
         self.assertEqual(decode_num(stack[0]), 1)

@@ -6,440 +6,87 @@ import hashlib
 import hmac
 
 from helper import encode_base58_checksum, encode_bech32_checksum, hash160
+from _libsec import ffi, lib
 
 
-class FieldElement:
-
-    def __init__(self, num, prime):
-        if num >= prime or num < 0:
-            error = 'Num {} not in field range 0 to {}'.format(
-                num, prime - 1)
-            raise ValueError(error)
-        self.num = num
-        self.prime = prime
-
-    def __repr__(self):
-        return 'FieldElement_{}({})'.format(self.prime, self.num)
-
-    def __eq__(self, other):
-        if other is None:
-            return False
-        return self.num == other.num and self.prime == other.prime
-
-    def __ne__(self, other):
-        # this should be the inverse of the == operator
-        return not (self == other)
-
-    def __add__(self, other):
-        if self.prime != other.prime:
-            raise TypeError('Cannot add two numbers in different Fields')
-        # self.num and other.num are the actual values
-        # self.prime is what we need to mod against
-        num = (self.num + other.num) % self.prime
-        # We return an element of the same class
-        return self.__class__(num, self.prime)
-
-    def __sub__(self, other):
-        if self.prime != other.prime:
-            raise TypeError('Cannot subtract two numbers in different Fields')
-        # self.num and other.num are the actual values
-        # self.prime is what we need to mod against
-        num = (self.num - other.num) % self.prime
-        # We return an element of the same class
-        return self.__class__(num, self.prime)
-
-    def __mul__(self, other):
-        if self.prime != other.prime:
-            raise TypeError('Cannot multiply two numbers in different Fields')
-        # self.num and other.num are the actual values
-        # self.prime is what we need to mod against
-        num = (self.num * other.num) % self.prime
-        # We return an element of the same class
-        return self.__class__(num, self.prime)
-
-    def __pow__(self, exponent):
-        n = exponent % (self.prime - 1)
-        num = pow(self.num, n, self.prime)
-        return self.__class__(num, self.prime)
-
-    def __truediv__(self, other):
-        if self.prime != other.prime:
-            raise TypeError('Cannot divide two numbers in different Fields')
-        # self.num and other.num are the actual values
-        # self.prime is what we need to mod against
-        # use fermat's little theorem:
-        # self.num**(p-1) % p == 1
-        # this means:
-        # 1/n == pow(n, p-2, p)
-        num = (self.num * pow(other.num, self.prime - 2, self.prime)) % self.prime
-        # We return an element of the same class
-        return self.__class__(num, self.prime)
-
-    def __rmul__(self, coefficient):
-        num = (self.num * coefficient) % self.prime
-        return self.__class__(num=num, prime=self.prime)
-
-
-class FieldElementTest(TestCase):
-
-    def test_ne(self):
-        a = FieldElement(2, 31)
-        b = FieldElement(2, 31)
-        c = FieldElement(15, 31)
-        self.assertEqual(a, b)
-        self.assertNotEqual(a, c)
-        self.assertFalse(a != b)
-        self.assertNotEqual(a, None)
-
-    def test_add(self):
-        a = FieldElement(2, 31)
-        b = FieldElement(15, 31)
-        self.assertEqual(a + b, FieldElement(17, 31))
-        a = FieldElement(17, 31)
-        b = FieldElement(21, 31)
-        self.assertEqual(a + b, FieldElement(7, 31))
-
-    def test_sub(self):
-        a = FieldElement(29, 31)
-        b = FieldElement(4, 31)
-        self.assertEqual(a - b, FieldElement(25, 31))
-        a = FieldElement(15, 31)
-        b = FieldElement(30, 31)
-        self.assertEqual(a - b, FieldElement(16, 31))
-
-    def test_mul(self):
-        a = FieldElement(24, 31)
-        b = FieldElement(19, 31)
-        self.assertEqual(a * b, FieldElement(22, 31))
-
-    def test_rmul(self):
-        a = FieldElement(24, 31)
-        b = 2
-        self.assertEqual(b * a, a + a)
-
-    def test_pow(self):
-        a = FieldElement(17, 31)
-        self.assertEqual(a**3, FieldElement(15, 31))
-        a = FieldElement(5, 31)
-        b = FieldElement(18, 31)
-        self.assertEqual(a**5 * b, FieldElement(16, 31))
-
-    def test_div(self):
-        a = FieldElement(3, 31)
-        b = FieldElement(24, 31)
-        self.assertEqual(a / b, FieldElement(4, 31))
-        a = FieldElement(17, 31)
-        self.assertEqual(a**-3, FieldElement(29, 31))
-        a = FieldElement(4, 31)
-        b = FieldElement(11, 31)
-        self.assertEqual(a**-4 * b, FieldElement(13, 31))
-
-    def test_errors(self):
-        with self.assertRaises(ValueError):
-            FieldElement(5,3)
-        a = FieldElement(3, 31)
-        b = FieldElement(3, 29)
-        with self.assertRaises(TypeError):
-            a+b
-        with self.assertRaises(TypeError):
-            a-b
-        with self.assertRaises(TypeError):
-            a*b
-        with self.assertRaises(TypeError):
-            a/b
-
-
-class Point:
-
-    def __init__(self, x, y, a, b):
-        self.a = a
-        self.b = b
-        self.x = x
-        self.y = y
-        # x being None and y being None represents the point at infinity
-        # Check for that here since the equation below won't make sense
-        # with None values for both.
-        if self.x is None and self.y is None:
-            return
-        # make sure that the elliptic curve equation is satisfied
-        # y**2 == x**3 + a*x + b
-        if self.y**2 != self.x**3 + a * x + b:
-            # if not, throw a ValueError
-            raise ValueError('({}, {}) is not on the curve'.format(x, y))
-
-    def __eq__(self, other):
-        return self.x == other.x and self.y == other.y \
-            and self.a == other.a and self.b == other.b
-
-    def __ne__(self, other):
-        # this should be the inverse of the == operator
-        return not (self == other)
-
-    def __repr__(self):
-        if self.x is None:
-            return 'Point(infinity)'
-        else:
-            return 'Point({},{})_{}_{}'.format(self.x, self.y, self.a, self.b)
-
-    def __add__(self, other):
-        if self.a != other.a or self.b != other.b:
-            raise TypeError('Points {}, {} are not on the same curve'.format(self, other))
-        # Case 0.0: self is the point at infinity, return other
-        if self.x is None:
-            return other
-        # Case 0.1: other is the point at infinity, return self
-        if other.x is None:
-            return self
-
-        # Case 1: self.x == other.x, self.y != other.y
-        # Result is point at infinity
-        if self.x == other.x and self.y != other.y:
-            return self.__class__(None, None, self.a, self.b)
-
-        # Case 2: self.x ≠ other.x
-        # Formula (x3,y3)==(x1,y1)+(x2,y2)
-        # s=(y2-y1)/(x2-x1)
-        # x3=s**2-x1-x2
-        # y3=s*(x1-x3)-y1
-        if self.x != other.x:
-            s = (other.y - self.y) / (other.x - self.x)
-            x = s**2 - self.x - other.x
-            y = s * (self.x - x) - self.y
-            return self.__class__(x, y, self.a, self.b)
-
-        # Case 4: if we are tangent to the vertical line,
-        # we return the point at infinity
-        # note instead of figuring out what 0 is for each type
-        # we just use 0 * self.x
-        if self == other and self.y == 0 * self.x:
-            return self.__class__(None, None, self.a, self.b)
-
-        # Case 3: self == other
-        # Formula (x3,y3)=(x1,y1)+(x1,y1)
-        # s=(3*x1**2+a)/(2*y1)
-        # x3=s**2-2*x1
-        # y3=s*(x1-x3)-y1
-        if self == other:
-            s = (3 * self.x**2 + self.a) / (2 * self.y)
-            x = s**2 - 2 * self.x
-            y = s * (self.x - x) - self.y
-            return self.__class__(x, y, self.a, self.b)
-
-    def __rmul__(self, coefficient):
-        coef = coefficient
-        current = self
-        result = self.__class__(None, None, self.a, self.b)
-        while coef:
-            if coef & 1:
-                result += current
-            current += current
-            coef >>= 1
-        return result
-
-
-class PointTest(TestCase):
-
-    def test_ne(self):
-        a = Point(x=3, y=-7, a=5, b=7)
-        b = Point(x=18, y=77, a=5, b=7)
-        self.assertTrue(a != b)
-        self.assertFalse(a != a)
-
-    def test_on_curve(self):
-        with self.assertRaises(ValueError):
-            Point(x=-2, y=4, a=5, b=7)
-        # these should not raise an error
-        Point(x=3, y=-7, a=5, b=7)
-        Point(x=18, y=77, a=5, b=7)
-
-    def test_add0(self):
-        a = Point(x=None, y=None, a=5, b=7)
-        b = Point(x=2, y=5, a=5, b=7)
-        c = Point(x=2, y=-5, a=5, b=7)
-        self.assertEqual(a + b, b)
-        self.assertEqual(b + a, b)
-        self.assertEqual(b + c, a)
-        self.assertEqual(a.__repr__(), 'Point(infinity)')
-        self.assertEqual(b.__repr__(), 'Point(2,5)_5_7')
-
-    def test_add1(self):
-        a = Point(x=3, y=7, a=5, b=7)
-        b = Point(x=-1, y=-1, a=5, b=7)
-        self.assertEqual(a + b, Point(x=2, y=-5, a=5, b=7))
-
-    def test_add2(self):
-        a = Point(x=-1, y=1, a=5, b=7)
-        self.assertEqual(a + a, Point(x=18, y=-77, a=5, b=7))
-
-    def test_add3(self):
-        a = Point(x=0, y=0, a=5, b=0)
-        self.assertEqual(a + a, Point(x=None, y=None, a=5, b=0))
-
-    def test_error(self):
-        a = Point(x=3, y=7, a=5, b=7)
-        b = Point(x=None, y=None, a=0, b=7)
-        with self.assertRaises(TypeError):
-            a+b
-
-
-class ECCTest(TestCase):
-
-    def test_on_curve(self):
-        # tests the following points whether they are on the curve or not
-        # on curve y^2=x^3-7 over F_223:
-        # (192,105) (17,56) (200,119) (1,193) (42,99)
-        # the ones that aren't should raise a ValueError
-        prime = 223
-        a = FieldElement(0, prime)
-        b = FieldElement(7, prime)
-
-        valid_points = ((192, 105), (17, 56), (1, 193))
-        invalid_points = ((200, 119), (42, 99))
-
-        # iterate over valid points
-        for x_raw, y_raw in valid_points:
-            x = FieldElement(x_raw, prime)
-            y = FieldElement(y_raw, prime)
-            # Creating the point should not result in an error
-            Point(x, y, a, b)
-
-        # iterate over invalid points
-        for x_raw, y_raw in invalid_points:
-            x = FieldElement(x_raw, prime)
-            y = FieldElement(y_raw, prime)
-            with self.assertRaises(ValueError):
-                Point(x, y, a, b)
-
-    def test_add(self):
-        # tests the following additions on curve y^2=x^3-7 over F_223:
-        # (192,105) + (17,56)
-        # (47,71) + (117,141)
-        # (143,98) + (76,66)
-        prime = 223
-        a = FieldElement(0, prime)
-        b = FieldElement(7, prime)
-
-        additions = (
-            # (x1, y1, x2, y2, x3, y3)
-            (192, 105, 17, 56, 170, 142),
-            (47, 71, 117, 141, 60, 139),
-            (143, 98, 76, 66, 47, 71),
-        )
-        # iterate over the additions
-        for x1_raw, y1_raw, x2_raw, y2_raw, x3_raw, y3_raw in additions:
-            x1 = FieldElement(x1_raw, prime)
-            y1 = FieldElement(y1_raw, prime)
-            p1 = Point(x1, y1, a, b)
-            x2 = FieldElement(x2_raw, prime)
-            y2 = FieldElement(y2_raw, prime)
-            p2 = Point(x2, y2, a, b)
-            x3 = FieldElement(x3_raw, prime)
-            y3 = FieldElement(y3_raw, prime)
-            p3 = Point(x3, y3, a, b)
-            # check that p1 + p2 == p3
-            self.assertEqual(p1 + p2, p3)
-
-    def test_rmul(self):
-        # tests the following scalar multiplications
-        # 2*(192,105)
-        # 2*(143,98)
-        # 2*(47,71)
-        # 4*(47,71)
-        # 8*(47,71)
-        # 21*(47,71)
-        prime = 223
-        a = FieldElement(0, prime)
-        b = FieldElement(7, prime)
-
-        multiplications = (
-            # (coefficient, x1, y1, x2, y2)
-            (2, 192, 105, 49, 71),
-            (2, 143, 98, 64, 168),
-            (2, 47, 71, 36, 111),
-            (4, 47, 71, 194, 51),
-            (8, 47, 71, 116, 55),
-            (21, 47, 71, None, None),
-        )
-
-        # iterate over the multiplications
-        for s, x1_raw, y1_raw, x2_raw, y2_raw in multiplications:
-            x1 = FieldElement(x1_raw, prime)
-            y1 = FieldElement(y1_raw, prime)
-            p1 = Point(x1, y1, a, b)
-            # initialize the second point based on whether it's the point at infinity
-            if x2_raw is None:
-                p2 = Point(None, None, a, b)
-            else:
-                x2 = FieldElement(x2_raw, prime)
-                y2 = FieldElement(y2_raw, prime)
-                p2 = Point(x2, y2, a, b)
-
-            # check that the product is equal to the expected point
-            self.assertEqual(s * p1, p2)
-
-
-A = 0
-B = 7
+GLOBAL_CTX = ffi.gc(lib.secp256k1_context_create(lib.SECP256K1_CONTEXT_SIGN | lib.SECP256K1_CONTEXT_VERIFY), lib.secp256k1_context_destroy)
 P = 2**256 - 2**32 - 977
 N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
 
 
-class S256Field(FieldElement):
+class S256Point:
 
-    def __init__(self, num, prime=None):
-        super().__init__(num=num, prime=P)
-
-    def __repr__(self):
-        return '{:x}'.format(self.num).zfill(64)
-
-    def sqrt(self):
-        return self**((P + 1) // 4)
-
-
-class S256Point(Point):
-
-    def __init__(self, x, y, a=None, b=None):
-        a, b = S256Field(A), S256Field(B)
-        if type(x) == int:
-            super().__init__(x=S256Field(x), y=S256Field(y), a=a, b=b)
+    def __init__(self, csec=None, usec=None):
+        if usec:
+            self.usec = usec
+            self.csec = None
+            sec_cache = usec
+        elif csec:
+            self.csec = csec
+            self.usec = None
+            sec_cache = csec
         else:
-            super().__init__(x=x, y=y, a=a, b=b)
+            raise RuntimeError('need a serialization')
+        self.c = ffi.new('secp256k1_pubkey *')
+        if not lib.secp256k1_ec_pubkey_parse(GLOBAL_CTX, self.c, sec_cache, len(sec_cache)):
+            raise RuntimeError('libsecp256k1 produced error')
 
+    def __eq__(self, other):
+        return self.sec() == other.sec()
+        
     def __repr__(self):
-        if self.x is None:
-            return 'S256Point(infinity)'
-        else:
-            return 'S256Point({}, {})'.format(self.x, self.y)
+        return 'S256Point({})'.format(self.sec(compressed=False).hex())
 
     def __rmul__(self, coefficient):
         coef = coefficient % N
-        return super().__rmul__(coef)
+        new_key = ffi.new('secp256k1_pubkey *')
+        s = self.sec(compressed=False)
+        lib.secp256k1_ec_pubkey_parse(GLOBAL_CTX, new_key, s, len(s))
+        lib.secp256k1_ec_pubkey_tweak_mul(GLOBAL_CTX, new_key, coef.to_bytes(32, 'big'))
+        serialized = ffi.new('unsigned char [65]')
+        output_len = ffi.new('size_t *', 65)
+        lib.secp256k1_ec_pubkey_serialize(GLOBAL_CTX, serialized, output_len, new_key, lib.SECP256K1_EC_UNCOMPRESSED)
+        return self.__class__(usec=bytes(serialized))
 
+    def __add__(self, scalar):
+        '''Multiplies scalar by generator, adds result to current point'''
+        coef = scalar % N
+        new_key = ffi.new('secp256k1_pubkey *')
+        s = self.sec(compressed=False)
+        lib.secp256k1_ec_pubkey_parse(GLOBAL_CTX, new_key, s, len(s))
+        lib.secp256k1_ec_pubkey_tweak_add(GLOBAL_CTX, new_key, coef.to_bytes(32, 'big'))
+        serialized = ffi.new('unsigned char [65]')
+        output_len = ffi.new('size_t *', 65)
+        lib.secp256k1_ec_pubkey_serialize(GLOBAL_CTX, serialized, output_len, new_key, lib.SECP256K1_EC_UNCOMPRESSED)
+        return self.__class__(usec=bytes(serialized))
+    
     def verify(self, z, sig):
-        # By Fermat's Little Theorem, 1/s = pow(s, N-2, N)
-        s_inv = pow(sig.s, N - 2, N)
-        # u = z / s
-        u = z * s_inv % N
-        # v = r / s
-        v = sig.r * s_inv % N
-        # u*G + v*P should have as the x coordinate, r
-        total = u * G + v * self
-        return total.x.num == sig.r
+        msg = z.to_bytes(32, 'big')
+        sig_data = sig.cdata()
+        return lib.secp256k1_ecdsa_verify(GLOBAL_CTX, sig_data, msg, self.c)
 
     def sec(self, compressed=True):
         '''returns the binary version of the SEC format'''
-        # if compressed, starts with b'\x02' if self.y.num is even, b'\x03' if self.y is odd
-        # then self.x.num
-        # remember, you have to convert self.x.num/self.y.num to binary (some_integer.to_bytes(32, 'big'))
         if compressed:
-            if self.y.num % 2 == 0:
-                return b'\x02' + self.x.num.to_bytes(32, 'big')
-            else:
-                return b'\x03' + self.x.num.to_bytes(32, 'big')
+            if not self.csec:
+                serialized = ffi.new('unsigned char [33]')
+                output_len = ffi.new('size_t *', 33)
+
+                lib.secp256k1_ec_pubkey_serialize(
+                    GLOBAL_CTX, serialized, output_len, self.c, lib.SECP256K1_EC_COMPRESSED,
+                )
+                self.csec = bytes(ffi.buffer(serialized, 33))
+            return self.csec
         else:
-            # if non-compressed, starts with b'\x04' followod by self.x and then self.y
-            return b'\x04' + self.x.num.to_bytes(32, 'big') + \
-                self.y.num.to_bytes(32, 'big')
+            if not self.usec:
+                serialized = ffi.new('unsigned char [65]')
+                output_len = ffi.new('size_t *', 65)
+
+                lib.secp256k1_ec_pubkey_serialize(
+                    GLOBAL_CTX, serialized, output_len, self.c, lib.SECP256K1_EC_UNCOMPRESSED,
+                )
+                self.usec = bytes(ffi.buffer(serialized, 65))
+            return self.usec
 
     def hash160(self, compressed=True):
         return hash160(self.sec(compressed))
@@ -466,212 +113,159 @@ class S256Point(Point):
         if sec_bin[0] == 4:
             x = int.from_bytes(sec_bin[1:33], 'big')
             y = int.from_bytes(sec_bin[33:65], 'big')
-            return S256Point(x=x, y=y)
-        is_even = sec_bin[0] == 2
-        x = S256Field(int.from_bytes(sec_bin[1:], 'big'))
-        # right side of the equation y^2 = x^3 + 7
-        alpha = x**3 + S256Field(B)
-        # solve for left side
-        beta = alpha.sqrt()
-        if beta.num % 2 == 0:
-            even_beta = beta
-            odd_beta = S256Field(P - beta.num)
+            return S256Point(usec=sec_bin)
         else:
-            even_beta = S256Field(P - beta.num)
-            odd_beta = beta
-        if is_even:
-            return S256Point(x, even_beta)
-        else:
-            return S256Point(x, odd_beta)
+            return S256Point(csec=sec_bin)
 
 
-G = S256Point(
-    0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,
-    0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8)
+G = S256Point(usec=bytes.fromhex('0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8'))
 
 
 class S256Test(TestCase):
 
-    def test_order(self):
-        point = N * G
-        self.assertEqual(point.__repr__(), 'S256Point(infinity)')
-        self.assertTrue(G.x.__repr__() in G.__repr__())
-        self.assertTrue(G.y.__repr__() in G.__repr__())
-
     def test_pubpoint(self):
         # write a test that tests the public point for the following
         points = (
-            # secret, x, y
-            (7, 0x5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc, 0x6aebca40ba255960a3178d6d861a54dba813d0b813fde7b5a5082628087264da),
-            (1485, 0xc982196a7466fbbbb0e27a940b6af926c1a74d5ad07128c82824a11b5398afda, 0x7a91f9eae64438afb9ce6448a1c133db2d8fb9254e4546b6f001637d50901f55),
-            (2**128, 0x8f68b9d2f63b5f339239c1ad981f162ee88c5678723ea3351b7b444c9ec4c0da, 0x662a9f2dba063986de1d90c2b6be215dbbea2cfe95510bfdf23cbf79501fff82),
-            (2**240 + 2**31, 0x9577ff57c8234558f293df502ca4f09cbc65a6572c842b39b366f21717945116, 0x10b49c67fa9365ad7b90dab070be339a1daf9052373ec30ffae4f72d5e66d053),
+            # secret, usec
+            (7, '045cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc6aebca40ba255960a3178d6d861a54dba813d0b813fde7b5a5082628087264da'),
+            (1485, '04c982196a7466fbbbb0e27a940b6af926c1a74d5ad07128c82824a11b5398afda7a91f9eae64438afb9ce6448a1c133db2d8fb9254e4546b6f001637d50901f55'),
+            (2**128, '048f68b9d2f63b5f339239c1ad981f162ee88c5678723ea3351b7b444c9ec4c0da662a9f2dba063986de1d90c2b6be215dbbea2cfe95510bfdf23cbf79501fff82'),
+            (2**240 + 2**31, '049577ff57c8234558f293df502ca4f09cbc65a6572c842b39b366f2171794511610b49c67fa9365ad7b90dab070be339a1daf9052373ec30ffae4f72d5e66d053'),
         )
 
         # iterate over points
-        for secret, x, y in points:
+        for secret, usec in points:
             # initialize the secp256k1 point (S256Point)
-            point = S256Point(x, y)
+            point = S256Point(usec=bytes.fromhex(usec))
             # check that the secret*G is the same as the point
             self.assertEqual(secret * G, point)
 
     def test_verify(self):
         point = S256Point(
-            0x887387e452b8eacc4acfde10d9aaf7f6d9a0f975aabb10d006e4da568744d06c,
-            0x61de6d95231cd89026e286df3b6ae4a894a3378e393e93a0f45b666329a0ae34)
-        z = 0xec208baa0fc1c19f708a9ca96fdeff3ac3f230bb4a7ba4aede4942ad003c0f60
-        r = 0xac8d1c87e51d0d441be8b3dd5b05c8795b48875dffe00b7ffcfac23010d3a395
-        s = 0x68342ceff8935ededd102dd876ffd6ba72d6a427a3edb13d26eb0781cb423c4
-        self.assertTrue(point.verify(z, Signature(r, s)))
-        z = 0x7c076ff316692a3d7eb3c3bb0f8b1488cf72e1afcd929e29307032997a838a3d
-        r = 0xeff69ef2b1bd93a66ed5219add4fb51e11a840f404876325a1e8ffe0529a2c
-        s = 0xc7207fee197d27c618aea621406f6bf5ef6fca38681d82b2f06fddbdce6feab6
-        self.assertTrue(point.verify(z, Signature(r, s)))
+            bytes.fromhex('04887387e452b8eacc4acfde10d9aaf7f6d9a0f975aabb10d006e4da568744d06c61de6d95231cd89026e286df3b6ae4a894a3378e393e93a0f45b666329a0ae34'))
+        tests = (
+            (
+                0xec208baa0fc1c19f708a9ca96fdeff3ac3f230bb4a7ba4aede4942ad003c0f60,
+                '3045022100ac8d1c87e51d0d441be8b3dd5b05c8795b48875dffe00b7ffcfac23010d3a3950220068342ceff8935ededd102dd876ffd6ba72d6a427a3edb13d26eb0781cb423c4',
+            ),
+            (
+                0x7c076ff316692a3d7eb3c3bb0f8b1488cf72e1afcd929e29307032997a838a3d,
+                '3044022000eff69ef2b1bd93a66ed5219add4fb51e11a840f404876325a1e8ffe0529a2c022038df8011e682d839e75159debf909408cb3f12ae472b1d88cf6280cf01c6568b',
+            ),
+        )
+        for z, der_hex in tests:
+            der = bytes.fromhex(der_hex)
+            self.assertTrue(point.verify(z, Signature(der=der)))
 
     def test_sec(self):
-        coefficient = 999**3
-        uncompressed = '049d5ca49670cbe4c3bfa84c96a8c87df086c6ea6a24ba6b809c9de234496808d56fa15cc7f3d38cda98dee2419f415b7513dde1301f8643cd9245aea7f3f911f9'
-        compressed = '039d5ca49670cbe4c3bfa84c96a8c87df086c6ea6a24ba6b809c9de234496808d5'
-        point = coefficient * G
-        self.assertEqual(point.sec(compressed=False), bytes.fromhex(uncompressed))
-        self.assertEqual(point.sec(compressed=True), bytes.fromhex(compressed))
-        computed = S256Point.parse(bytes.fromhex(uncompressed))
-        self.assertEqual(point.x, computed.x)
-        computed = S256Point.parse(bytes.fromhex(compressed))
-        self.assertEqual(point.x, computed.x)
-        coefficient = 123
-        uncompressed = '04a598a8030da6d86c6bc7f2f5144ea549d28211ea58faa70ebf4c1e665c1fe9b5204b5d6f84822c307e4b4a7140737aec23fc63b65b35f86a10026dbd2d864e6b'
-        compressed = '03a598a8030da6d86c6bc7f2f5144ea549d28211ea58faa70ebf4c1e665c1fe9b5'
-        point = coefficient * G
-        self.assertEqual(point.sec(compressed=False), bytes.fromhex(uncompressed))
-        self.assertEqual(point.sec(compressed=True), bytes.fromhex(compressed))
-        computed = S256Point.parse(bytes.fromhex(uncompressed))
-        self.assertEqual(point.x, computed.x)
-        computed = S256Point.parse(bytes.fromhex(compressed))
-        self.assertEqual(point.x, computed.x)
-        coefficient = 42424242
-        uncompressed = '04aee2e7d843f7430097859e2bc603abcc3274ff8169c1a469fee0f20614066f8e21ec53f40efac47ac1c5211b2123527e0e9b57ede790c4da1e72c91fb7da54a3'
-        compressed = '03aee2e7d843f7430097859e2bc603abcc3274ff8169c1a469fee0f20614066f8e'
-        point = coefficient * G
-        self.assertEqual(point.sec(compressed=False), bytes.fromhex(uncompressed))
-        self.assertEqual(point.sec(compressed=True), bytes.fromhex(compressed))
-        computed = S256Point.parse(bytes.fromhex(uncompressed))
-        self.assertEqual(point.x, computed.x)
-        computed = S256Point.parse(bytes.fromhex('02' + compressed[2:]))
-        self.assertEqual(point.x, computed.x)
+        tests = (
+            (
+                999**3,
+                '049d5ca49670cbe4c3bfa84c96a8c87df086c6ea6a24ba6b809c9de234496808d56fa15cc7f3d38cda98dee2419f415b7513dde1301f8643cd9245aea7f3f911f9',
+                '039d5ca49670cbe4c3bfa84c96a8c87df086c6ea6a24ba6b809c9de234496808d5',
+            ),
+            (
+                123,
+                '04a598a8030da6d86c6bc7f2f5144ea549d28211ea58faa70ebf4c1e665c1fe9b5204b5d6f84822c307e4b4a7140737aec23fc63b65b35f86a10026dbd2d864e6b',
+                '03a598a8030da6d86c6bc7f2f5144ea549d28211ea58faa70ebf4c1e665c1fe9b5',
+            ),
+            (
+                42424242,
+                '04aee2e7d843f7430097859e2bc603abcc3274ff8169c1a469fee0f20614066f8e21ec53f40efac47ac1c5211b2123527e0e9b57ede790c4da1e72c91fb7da54a3',
+                '03aee2e7d843f7430097859e2bc603abcc3274ff8169c1a469fee0f20614066f8e',
+            ),
+        )
+        for coefficient, usec_hex, csec_hex in tests:
+            point = coefficient * G
+            usec = bytes.fromhex(usec_hex)
+            csec = bytes.fromhex(csec_hex)
+            self.assertEqual(point.sec(compressed=False), usec)
+            self.assertEqual(point.sec(compressed=True), csec)
+            computed = S256Point.parse(usec)
+            self.assertEqual(point, computed)
+            computed = S256Point.parse(csec)
+            self.assertEqual(point, computed)
 
     def test_address(self):
-        secret = 888**3
-        mainnet_address = '148dY81A9BmdpMhvYEVznrM45kWN32vSCN'
-        testnet_address = 'mieaqB68xDCtbUBYFoUNcmZNwk74xcBfTP'
-        point = secret * G
-        self.assertEqual(
-            point.address(compressed=True, testnet=False), mainnet_address)
-        self.assertEqual(
-            point.address(compressed=True, testnet=True), testnet_address)
-        mainnet_address = 'bc1qyfvunnpszmjwcqgfk9dsne6j4edq3fglx9y5x7'
-        testnet_address = 'tb1qyfvunnpszmjwcqgfk9dsne6j4edq3fglvrl8ad'
-        point = secret * G
-        self.assertEqual(
-            point.bech32_address(testnet=False), mainnet_address)
-        self.assertEqual(
-            point.bech32_address(testnet=True), testnet_address)
-        secret = 321
-        mainnet_address = '1S6g2xBJSED7Qr9CYZib5f4PYVhHZiVfj'
-        testnet_address = 'mfx3y63A7TfTtXKkv7Y6QzsPFY6QCBCXiP'
-        point = secret * G
-        self.assertEqual(
-            point.address(compressed=False, testnet=False), mainnet_address)
-        self.assertEqual(
-            point.address(compressed=False, testnet=True), testnet_address)
-        secret = 4242424242
-        mainnet_address = '1226JSptcStqn4Yq9aAmNXdwdc2ixuH9nb'
-        testnet_address = 'mgY3bVusRUL6ZB2Ss999CSrGVbdRwVpM8s'
-        point = secret * G
-        self.assertEqual(
-            point.address(compressed=False, testnet=False), mainnet_address)
-        self.assertEqual(
-            point.address(compressed=False, testnet=True), testnet_address)
+        tests = (
+            (
+                888**3,
+                '148dY81A9BmdpMhvYEVznrM45kWN32vSCN',
+                'mnabU9NCcRE5zcNZ2C16CnvKPELrFvisn3',
+                'bc1qyfvunnpszmjwcqgfk9dsne6j4edq3fglx9y5x7',
+                'tb1qyfvunnpszmjwcqgfk9dsne6j4edq3fglvrl8ad',
+            ),
+            (
+                321,
+                '1FNgueDbMYjNQ8HT77sHKxTwdrHMdTGwyN',
+                'mfx3y63A7TfTtXKkv7Y6QzsPFY6QCBCXiP',
+                'bc1qnk4u7vkat6ck9t4unlgvvle8dhsqp40mrssamm',
+                'tb1qnk4u7vkat6ck9t4unlgvvle8dhsqp40mfktwqg',
+            ),
+            (
+                4242424242,
+                '1HUYfVCXEmp76uh17bE2gA72Vuqv4wrM1a',
+                'mgY3bVusRUL6ZB2Ss999CSrGVbdRwVpM8s',
+                'bc1qkjm6e3c79zy7clsfx86q4pvy46ccc5u9xa6f6e',
+                'tb1qkjm6e3c79zy7clsfx86q4pvy46ccc5u9vmp6p2',
+            ),
+        )
+        for secret, mainnet_legacy, testnet_legacy, mainnet_bech32, testnet_bech32 in tests:
+            point = secret * G
+            self.assertEqual(
+                point.address(testnet=False), mainnet_legacy)
+            self.assertEqual(
+                point.address(compressed=False, testnet=True), testnet_legacy)
+            self.assertEqual(
+                point.bech32_address(testnet=False), mainnet_bech32)
+            self.assertEqual(
+                point.bech32_address(testnet=True), testnet_bech32)
 
 
 class Signature:
 
-    def __init__(self, r, s):
-        self.r = r
-        self.s = s
+    def __init__(self, der=None, c=None):
+        if der:
+            self.der_cache = der
+            self.c = ffi.new('secp256k1_ecdsa_signature *')
+            if not lib.secp256k1_ecdsa_signature_parse_der(GLOBAL_CTX, self.c, der, len(der)):
+                raise RuntimeError('badly formatted signature {}'.format(der.hex()))
+        elif c:
+            self.c = c
+            self.der_cache = None
+        else:
+            raise RuntimeError('need der or c object')
+
+    def __eq__(self, other):
+        return self.der() == other.der()
 
     def __repr__(self):
-        return 'Signature({:x},{:x})'.format(self.r, self.s)
+        return 'Signature()'.format(self.der().hex())
 
     def der(self):
-        rbin = self.r.to_bytes(32, byteorder='big')
-        # remove all null bytes at the beginning
-        rbin = rbin.lstrip(b'\x00')
-        # if rbin has a high bit, add a \x00
-        if rbin[0] & 0x80:
-            rbin = b'\x00' + rbin
-        result = bytes([2, len(rbin)]) + rbin
-        sbin = self.s.to_bytes(32, byteorder='big')
-        # remove all null bytes at the beginning
-        sbin = sbin.lstrip(b'\x00')
-        # if sbin has a high bit, add a \x00
-        if sbin[0] & 0x80:
-            sbin = b'\x00' + sbin
-        result += bytes([2, len(sbin)]) + sbin
-        return bytes([0x30, len(result)]) + result
+        if not self.der_cache:
+            der = ffi.new('unsigned char[72]')
+            der_length = ffi.new('size_t *', 72)
+            lib.secp256k1_ecdsa_signature_serialize_der(GLOBAL_CTX, der, der_length, self.c)
+            self.der_cache = bytes(ffi.buffer(der, der_length[0]))
+        return self.der_cache
 
-    @classmethod
-    def parse(cls, signature_bin):
-        s = BytesIO(signature_bin)
-        compound = s.read(1)[0]
-        if compound != 0x30:
-            raise SyntaxError("Bad Signature")
-        length = s.read(1)[0]
-        if length + 2 != len(signature_bin):
-            raise SyntaxError("Bad Signature Length")
-        marker = s.read(1)[0]
-        if marker != 0x02:
-            raise SyntaxError("Bad Signature")
-        rlength = s.read(1)[0]
-        r = int.from_bytes(s.read(rlength), 'big')
-        marker = s.read(1)[0]
-        if marker != 0x02:
-            raise SyntaxError("Bad Signature")
-        slength = s.read(1)[0]
-        s = int.from_bytes(s.read(slength), 'big')
-        if len(signature_bin) != 6 + rlength + slength:
-            raise SyntaxError("Signature wrong length")
-        return cls(r, s)
+    def cdata(self):
+        return self.c
 
 
 class SignatureTest(TestCase):
 
     def test_der(self):
-        testcases = (
-            (1, 2),
-            (randint(0, 2**256), randint(0, 2**255)),
-            (randint(0, 2**256), randint(0, 2**255)),
-            (0x80, 0x80),
+        tests = (
+            '3045022100ed81ff192e75a3fd2304004dcadb746fa5e24c5031ccfcf21320b0277457c98f02207a986d955c6e0cb35d446a89d3f56100f4d7f67801c31967743a9c8e10615bed',
         )
-        for r, s in testcases:
-            sig = Signature(r, s)
+        for der_hex in tests:
+            der = bytes.fromhex(der_hex)
+            sig = Signature(der)
             self.assertTrue('Signature' in sig.__repr__())
-            der = sig.der()
-            sig2 = Signature.parse(der)
-            self.assertEqual(sig2.r, r)
-            self.assertEqual(sig2.s, s)
-
-    def test_error(self):
-        with self.assertRaises(SyntaxError):
-            Signature.parse(b'\x29')
-        with self.assertRaises(SyntaxError):
-            Signature.parse(b'\x30\x02\x01')
-        with self.assertRaises(SyntaxError):
-            Signature.parse(b'\x30\x02\x01\x01')
-        with self.assertRaises(SyntaxError):
-            Signature.parse(b'\x30\x05\x02\x02\x01\x01\x01')
-        with self.assertRaises(SyntaxError):
-            Signature.parse(b'\x30\x08\x02\x02\x00\x00\x02\x01\x00\x00')
+            computed = sig.der()
+            self.assertEqual(der, computed)
 
 
 class PrivateKey:
@@ -681,38 +275,15 @@ class PrivateKey:
         self.point = secret * G
 
     def sign(self, z):
-        k = self.deterministic_k(z)
-        # r is the x coordinate of the resulting point k*G
-        r = (k * G).x.num
-        # remember 1/k = pow(k, N-2, N)
-        k_inv = pow(k, N - 2, N)
-        # s = (z+r*secret) / k
-        s = (z + r * self.secret) * k_inv % N
-        if s > N / 2:
-            s = N - s
-        # return an instance of Signature:
-        # Signature(r, s)
-        return Signature(r, s)
-
-    def deterministic_k(self, z):
-        k = b'\x00' * 32
-        v = b'\x01' * 32
-        if z > N:
-            z -= N
-        z_bytes = z.to_bytes(32, 'big')
-        secret_bytes = self.secret.to_bytes(32, 'big')
-        s256 = hashlib.sha256
-        k = hmac.new(k, v + b'\x00' + secret_bytes + z_bytes, s256).digest()
-        v = hmac.new(k, v, s256).digest()
-        k = hmac.new(k, v + b'\x01' + secret_bytes + z_bytes, s256).digest()
-        v = hmac.new(k, v, s256).digest()
-        while True:
-            v = hmac.new(k, v, s256).digest()
-            candidate = int.from_bytes(v, 'big')
-            if candidate >= 1 and candidate < N:
-                return candidate
-            k = hmac.new(k, v + b'\x00', s256).digest()  # pragma: no cover
-            v = hmac.new(k, v, s256).digest()            # pragma: no cover
+        secret = self.secret.to_bytes(32, 'big')
+        msg = z.to_bytes(32, 'big')
+        csig = ffi.new('secp256k1_ecdsa_signature *')
+        if not lib.secp256k1_ecdsa_sign(GLOBAL_CTX, csig, msg, secret, ffi.NULL, ffi.NULL):
+            raise RuntimeError('something went wrong with c signing')
+        sig = Signature(c=csig)
+        if not self.point.verify(z, sig):
+            raise RuntimeError('something went wrong with signing')
+        return sig
 
     def wif(self, compressed=True, testnet=False):
         # convert the secret from integer to a 32-bytes in big endian using num.to_bytes(32, 'big')

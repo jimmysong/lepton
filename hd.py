@@ -294,7 +294,7 @@ class HDPublicKey:
         sec = self.point.sec()
         data = sec + index.to_bytes(4, 'big')
         raw = HMAC(key=self.chain_code, msg=data, digestmod=sha512).digest()
-        point = PrivateKey(int.from_bytes(raw[:32], 'big')).point + self.point
+        point = self.point + int.from_bytes(raw[:32], 'big')
         chain_code = raw[32:]
         depth = self.depth + 1
         fingerprint = hash160(sec)[:4]
