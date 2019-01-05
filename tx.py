@@ -1,4 +1,5 @@
 from io import BytesIO
+from logging import getLogger
 from os.path import exists
 from unittest import TestCase
 
@@ -27,6 +28,9 @@ from script import (
     p2wsh_script,
     Script,
 )
+
+
+LOGGER = getLogger(__name__)
 
 
 class TxStore:
@@ -297,7 +301,9 @@ class Tx:
         # add the hash_type int 4 bytes, little endian
         result = alt_tx.serialize() + int_to_little_endian(SIGHASH_ALL, 4)
         # get the hash256 of the tx serialization
+        LOGGER.info('result = {}'.format(result.hex()))
         s256 = hash256(result)
+        LOGGER.info('s256 = {}'.format(s256.hex()))
         # convert this to a big-endian integer using int.from_bytes(x, 'big')
         return int.from_bytes(s256, 'big')
 
@@ -381,9 +387,8 @@ class Tx:
                 z = self.sig_hash_bip143(input_index, witness_script=witness_script)
                 witness = tx_in.witness
             else:
-                print(tx_in.script_sig)
                 z = self.sig_hash(input_index)
-                print(z.to_bytes(32, 'big').hex())
+                LOGGER.info('z = '.format(hex(z)))
                 witness = None
         # combine the current script_sig and the previous script_pubkey
         script = tx_in.script_sig + script_pubkey
@@ -397,7 +402,7 @@ class Tx:
         '''Verify every input of this transaction'''
         for i in range(len(self.tx_ins)):
             if not self.verify_input(i):
-                print('failed at input {}'.format(i))
+                LOGGER.info('failed at input {}'.format(i))
                 return False
         return True
 
@@ -818,19 +823,31 @@ class TxTest(TestCase):
 
     def test_verify_weird(self):
         tx_ids = (
-#            'efdf1b981d7bba9c941295c0dfc654c4b5e40d7b9744819dd4f78b8e149898e1',
-#            '9aa3a5a6d9b7d1ac9555be8e42596d06686cc5f76d259b06c560a207d310d5f5',
-#            'c5d4b73af6eed28798473b05d2b227edd4f285069629843e899b52c2d1c165b7',
-#            '74ea059a63c7ebddaee6805e1560b15c937d99a9ee9745412cbc6d2a0a5f5305',
+            'efdf1b981d7bba9c941295c0dfc654c4b5e40d7b9744819dd4f78b8e149898e1',
+            '9aa3a5a6d9b7d1ac9555be8e42596d06686cc5f76d259b06c560a207d310d5f5',
+            'c5d4b73af6eed28798473b05d2b227edd4f285069629843e899b52c2d1c165b7',
             'e335562f7e297aadeed88e5954bc4eeb8dc00b31d829eedb232e39d672b0c009',
             'dc3aad51b4b9ea1ef40755a38b0b4d6e08c72d2ac5e95b8bebe9bd319b6aed7e',
         )
         for tx_id in tx_ids:
-            print(tx_id)
             tx = TxStore.fetch(tx_id, testnet=True)
             tx.bip112 = False
             tx.bip65 = False
             self.assertTrue(tx.verify())
+
+    def test_verify_weird_2(self):
+        import script
+        before = script.DEBUG
+        script.DEBUG = True
+        tx = TxStore.fetch(
+            '74ea059a63c7ebddaee6805e1560b15c937d99a9ee9745412cbc6d2a0a5f5305',
+            testnet=True)
+        tx.bip112 = False
+        tx.bip65 = False
+        for i in range(len(tx.tx_ins)):
+            if i not in (29, 31):
+                self.assertTrue(tx.verify_input(i), i)
+        script.DEBUG = before
 
     def test_sign_input_p2pkh(self):
         private_key = PrivateKey(secret=8675309)
@@ -912,7 +929,7 @@ class TxTest(TestCase):
         t = Tx(1, [tx_in], [tx_out], 0, testnet=True)
         t.sign_input_p2wpkh(0, private_key)
         want = '010000000001016eaa497551fb3dd259d86e90c58ff6a829aa6d606a12962fcec3cc9fc28d29150000000000ffffffff0100350c0000000000220020cb3e53932454c13bcef40c271bfa224fca4253b98c215cf8a0e4d00e9c8fc847024730440220627d44b8eea048a45491c923647f397a7a15b412aa4d39d3a050a754bf3d1824022036cde64835589db899034b4a58757ec7fed7e120aa85ae40ff7eb625314e5d9f01210223136797cb0d7596cb5bd476102fe3aface2a06338e1afabffacf8c3cab4883c00000000'
-        print(t.serialize_segwit().hex(), want)
+        self.assertEqual(t.serialize_segwit().hex(), want)
 
     def test_p2wsh_multisig(self):
         secrets = (b'jimmy@programmingblockchain.com test1', b'jimmy@programmingblockchain.com test2')

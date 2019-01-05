@@ -141,19 +141,25 @@ class S256Test(TestCase):
             self.assertEqual(secret * G, point)
 
     def test_verify(self):
-        point = S256Point(
-            bytes.fromhex('04887387e452b8eacc4acfde10d9aaf7f6d9a0f975aabb10d006e4da568744d06c61de6d95231cd89026e286df3b6ae4a894a3378e393e93a0f45b666329a0ae34'))
         tests = (
             (
                 0xec208baa0fc1c19f708a9ca96fdeff3ac3f230bb4a7ba4aede4942ad003c0f60,
                 '3045022100ac8d1c87e51d0d441be8b3dd5b05c8795b48875dffe00b7ffcfac23010d3a3950220068342ceff8935ededd102dd876ffd6ba72d6a427a3edb13d26eb0781cb423c4',
+                '04887387e452b8eacc4acfde10d9aaf7f6d9a0f975aabb10d006e4da568744d06c61de6d95231cd89026e286df3b6ae4a894a3378e393e93a0f45b666329a0ae34',
             ),
             (
                 0x7c076ff316692a3d7eb3c3bb0f8b1488cf72e1afcd929e29307032997a838a3d,
                 '3044022000eff69ef2b1bd93a66ed5219add4fb51e11a840f404876325a1e8ffe0529a2c022038df8011e682d839e75159debf909408cb3f12ae472b1d88cf6280cf01c6568b',
+                '04887387e452b8eacc4acfde10d9aaf7f6d9a0f975aabb10d006e4da568744d06c61de6d95231cd89026e286df3b6ae4a894a3378e393e93a0f45b666329a0ae34',
+            ),
+            (
+                0x2270cb0316e68389a3a23de16023a03b8fc271a21b467b1dc97e0fc0e2ce97f7,
+                '3045022100ea6d640d5275d091607e1f4ad5cdb214e45f8d17cca1095074894dde347605ba022029062e1ff0d9eee52da1f3621caf92436877d7076720e2b3d9f226bf853e2b75',
+                '04f47dc2ac0ecaadda5ee2b3ab9bc4e02c3eafb2abcc426643686ad95f6d4e8c44e33fa47d96fc2dace0ef2f583965cf6a0f8faa7a070c0f8ee986d192e2d21835',
             ),
         )
-        for z, der_hex in tests:
+        for z, der_hex, sec in tests:
+            point = S256Point(usec=bytes.fromhex(sec))
             der = bytes.fromhex(der_hex)
             self.assertTrue(point.verify(z, Signature(der=der)))
 

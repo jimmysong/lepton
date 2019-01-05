@@ -98,7 +98,7 @@ def print_state(instructions, instruction, stack, altstack):
         if len(instructions) >= total_height - i:
             current = instructions[len(instructions) - (total_height - i)]
             if type(current) == int:
-                current = OP_CODE_NAMES[current]
+                current = OP_CODE_NAMES.get(current) or '<unknown>'
             else:
                 current = current.hex()[:column_width]
             to_print += format_str.format(current)
@@ -108,7 +108,7 @@ def print_state(instructions, instruction, stack, altstack):
         if i == total_height - 1:
             current = instruction
             if type(current) == int:
-                current = OP_CODE_NAMES[current]
+                current = OP_CODE_NAMES.get(current) or '<unknown>'
             else:
                 current = current.hex()[:column_width]
             to_print += format_str.format(current)
@@ -141,19 +141,19 @@ class Script:
         self.coinbase = coinbase
 
     def __repr__(self):
-        result = ''
         if self.coinbase:
             return self.coinbase.hex()
+        result = []
         for instruction in self.instructions:
             if type(instruction) == int:
                 if OP_CODE_NAMES.get(instruction):
-                    name = OP_CODE_NAMES.get(instruction)
+                    name = OP_CODE_NAMES.get(instruction) or '<unknown>'
                 else:
                     name = 'OP_[{}]'.format(instruction)
-                result += '{} '.format(name)
+                result.append(name)
             else:
-                result += '{} '.format(instruction.hex())
-        return result
+                result.append(instruction.hex())
+        return ' '.join(result)
 
     @classmethod
     def parse(cls, s, coinbase_mode=False):
@@ -431,12 +431,17 @@ class ScriptTest(TestCase):
         self.assertEqual(script.serialize().hex(), want)
 
     def test_p2pkh(self):
-        script_pubkey_raw = bytes.fromhex('1976a914bc3b654dca7e56b04dca18f2566cdaf02e8d9ada88ac')
+        script_pubkey_raw = bytes.fromhex('1976a914a802fc56c704ce87c42d7c92eb75e7896bdc41ae88ac')
         script_pubkey = Script.parse(BytesIO(script_pubkey_raw))
+        self.assertEqual(script_pubkey.__repr__(), 'OP_DUP OP_HASH160 a802fc56c704ce87c42d7c92eb75e7896bdc41ae OP_EQUALVERIFY OP_CHECKSIG')
         self.assertEqual(script_pubkey.serialize(), script_pubkey_raw)
         script_sig_raw = bytes.fromhex('6b483045022100ed81ff192e75a3fd2304004dcadb746fa5e24c5031ccfcf21320b0277457c98f02207a986d955c6e0cb35d446a89d3f56100f4d7f67801c31967743a9c8e10615bed01210349fc4e631e3624a545de3f89f5d8684c7b8138bd94bdd531d2e213bf016b278a')
         script_sig = Script.parse(BytesIO(script_sig_raw))
         self.assertEqual(script_sig.serialize(), script_sig_raw)
+        self.assertEqual(script_sig.__repr__(), '3045022100ed81ff192e75a3fd2304004dcadb746fa5e24c5031ccfcf21320b0277457c98f02207a986d955c6e0cb35d446a89d3f56100f4d7f67801c31967743a9c8e10615bed01 0349fc4e631e3624a545de3f89f5d8684c7b8138bd94bdd531d2e213bf016b278a')
+        combined = script_sig + script_pubkey
+        z = 0x27e0c5994dec7824e56dec6b2fcb342eb7cdb0d0957c2fce9882f715e85d81a6
+        self.assertTrue(combined.evaluate(z, 1, 410393, 0xfffffffe, None))
 
     def test_p2sh(self):
         script_pubkey_raw = bytes.fromhex('17a91474d691da1574e6b3c192ecfb52cc8984ee7b6c5687')

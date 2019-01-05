@@ -680,6 +680,7 @@ def op_checksig(stack, z):
     if point.verify(z, sig):
         stack.append(encode_num(1))
     else:
+        LOGGER.info('z = {}'.format(hex(z)))
         stack.append(encode_num(0))
     return True
 
