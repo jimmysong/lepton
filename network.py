@@ -787,6 +787,7 @@ class SimpleNode:
 
     def send_tx_legacy(self, tx_obj):
         self.send(tx_obj)
+        return tx_obj.id()
 
     def send_tx_segwit(self, tx_obj):
         # send an inv message with out tx
@@ -800,7 +801,7 @@ class SimpleNode:
             if identifier == tx_hash and data_type == WITNESS_TX_DATA_TYPE:
                 LOGGER.info('sending tx: {}'.format(tx_obj.id()))
                 self.send(tx_obj)
-                break
+                return tx_obj.id()
 
 
 class SimpleNodeTest(TestCase):

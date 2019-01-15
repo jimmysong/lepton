@@ -72,6 +72,15 @@ class UTXO:
     def __init__(self, txo):
         self.txo = txo
 
+    def __repr__(self):
+        return '{amount} BTC {address} {path} {tx_id}:{tx_index} '.format(
+            tx_id=self.txo.tx_id.hex(),
+            tx_index=self.txo.tx_index,
+            amount=self.txo.amount / 100000000,
+            address=self.txo.script_pubkey.address(testnet=True),
+            path=self.txo.path,
+        )
+
     @classmethod
     def parse(cls, s):
         txo = TXO.parse(s)
@@ -305,6 +314,19 @@ class Wallet:
         self.save()
         return pub.bech32_address()
 
+    def addresses(self):
+        external, internal = [], []
+        for i in range(self.next_external):
+            pub = self.public.child(0).child(i)
+            external.append(pub.bech32_address())
+        for i in range(self.next_internal):
+            pub = self.public.child(0).child(i)
+            internal.append(pub.bech32_address())
+        return external, internal
+
+    def get_utxos(self):
+        return self.utxo_lookup.values()
+    
     def change_script_pubkey(self):
         pub = self.public.child(1).child(self.next_internal)
         self.next_internal += 1
