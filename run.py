@@ -14,14 +14,32 @@ class MyPrompt(Cmd):
         print('Program Locked')
         return True
 
-    def do_load(self, inp):
-        '''Load Wallet'''
+    def do_open(self, inp):
+        '''Open Wallet'''
         if inp:
             print('Loading Wallet: {}'.format(inp))
             self.w = Wallet.open(inp)
         else:
             print('Loading Wallet')
             self.w = Wallet.open()
+
+    def do_print(self, inp):
+        '''Data about the wallet'''
+        print(self.w)
+
+    def do_debug(self, inp):
+        if self.w is None:
+            print('Please load the wallet first')
+        else:
+            self.w.node.logging = True
+            
+    def do_recover(self, inp):
+        '''Load Wallet'''
+        mnemonic = input('Type your mnemonic: ')
+        filename = input('Save to file [testnet.wallet]: ')
+        if not filename:
+            filename = 'testnet.wallet'
+        self.w = Wallet.recover(mnemonic, filename=filename, testnet=True)
 
     def do_update(self, inp):
         '''Sync Wallet to the latest'''
@@ -39,6 +57,22 @@ class MyPrompt(Cmd):
             print('UTXOS')
             for utxo in self.w.get_utxos():
                 print(utxo)
+
+    def do_history(self, inp):
+        '''List all transactions'''
+        if self.w is None:
+            print('Please load the wallet first')
+        else:
+            print('History')
+            for stxo in self.w.get_history():
+                print(stxo)
+
+    def do_rescan(self, inp):
+        '''Rescan the blockchain for transactions'''
+        if self.w is None:
+            print('Please load the wallet first')
+        else:
+            self.w.rescan()
 
     def do_balance(self, inp):
         '''Get balance of the wallet'''
@@ -87,11 +121,13 @@ class MyPrompt(Cmd):
         if len(args) == 0:
             addr = input('To what address? ')
             amount = int(float(input('How much in BTC? '))*100000000)
+            fee = int(input('fee in satoshi/byte: '))
         else:
             addr = args[1]
             amount = int(float(args[0])*100000000)
-        print(self.w.simple_send(addr, amount))
+            fee = args[2] or 1
+        print(self.w.simple_send(addr, amount, fee))
 
 
-
-MyPrompt().cmdloop()
+if __name__ == '__main__':
+    MyPrompt().cmdloop()

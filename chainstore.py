@@ -66,10 +66,11 @@ class BlockStore:
                 else:
                     # one full difficulty adjustment + remaining
                     self.start_height = (file_height // 2016 - 1) * 2016
-                for _ in range(self.start_height, file_height + 1):
+                for height in range(self.start_height, file_height + 1):
                     header = Block.parse_header(f)
                     header.cfheader = f.read(32)
                     header.cfhash = f.read(32)
+                    header.height = height
                     headers.append(header)
                 self.headers = headers[::-1]
         self.headers_lookup = {h.hash(): h for h in self.headers}
@@ -189,6 +190,7 @@ class BlockStore:
                 prev_filter_header = filter_header
                 header.cfhash = filter_hash
                 header.cfheader = filter_header
+                header.height = start + j
             if cpfilter_header is not None and cpfilter_header != prev_filter_header:
                 raise RuntimeError('CF header not what we expected')
 

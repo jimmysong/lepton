@@ -8,8 +8,8 @@ import hashlib
 SIGHASH_ALL = 1
 SIGHASH_NONE = 2
 SIGHASH_SINGLE = 3
-BASE58_ALPHABET = b'123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-BECH32_ALPHABET = b'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+BECH32_ALPHABET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
 GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
 TWO_WEEKS = 60 * 60 * 24 * 14
 MAX_TARGET = 0xffff * 256**(0x1d - 3)
@@ -62,15 +62,15 @@ def encode_base58(s):
             count += 1
         else:
             break
-    prefix = b'1' * count
     # convert from binary to hex, then hex to integer
     num = int.from_bytes(s, 'big')
-    result = bytearray()
+    result = ''
+    prefix = '1' * count
     while num > 0:
         num, mod = divmod(num, 58)
-        result.insert(0, BASE58_ALPHABET[mod])
+        result = BASE58_ALPHABET[mod] + result
 
-    return prefix + bytes(result)
+    return prefix + result
 
 
 def encode_base58_checksum(raw):
@@ -78,18 +78,12 @@ def encode_base58_checksum(raw):
     # checksum is the first 4 bytes of the hash256
     checksum = hash256(raw)[:4]
     # encode_base58 on the raw and the checksum
-    base58 = encode_base58(raw + checksum)
-    # turn to string with base58.decode('ascii')
-    return base58.decode('ascii')
+    return encode_base58(raw + checksum)
 
 
 def raw_decode_base58(s, num_bytes):
-    if type(s) == str:
-        b = s.encode('ascii')
-    else:
-        b = s
     num = 0
-    for c in b:
+    for c in s:
         num *= 58
         num += BASE58_ALPHABET.index(c)
     combined = num.to_bytes(num_bytes, 'big')
@@ -118,7 +112,8 @@ def bech32_polymod(values):
 
 
 def bech32_hrp_expand(s):
-    return [x >> 5 for x in s] + [0] + [x & 31 for x in s]
+    b = s.encode('ascii')
+    return [x >> 5 for x in b] + [0] + [x & 31 for x in b]
 
 
 def bech32_verify_checksum(hrp, data):
@@ -150,15 +145,18 @@ def group_32(s):
 
 def encode_bech32(nums):
     '''Convert from 5-bit array of integers to bech32 format'''
-    return bytes([BECH32_ALPHABET[n] for n in nums])
+    result = ''
+    for n in nums:
+        result += BECH32_ALPHABET[n]
+    return result
 
 
 def encode_bech32_checksum(s, testnet=False):
     '''Convert a witness program to a bech32 address'''
     if testnet:
-        prefix = b'tb'
+        prefix = 'tb'
     else:
-        prefix = b'bc'
+        prefix = 'bc'
     version = s[0]
     if version > 0:
         version -= 0x50
@@ -166,13 +164,12 @@ def encode_bech32_checksum(s, testnet=False):
     data = [version] + group_32(s[2:2 + length])
     checksum = bech32_create_checksum(prefix, data)
     bech32 = encode_bech32(data + checksum)
-    result = prefix + b'1' + bech32
-    return result.decode('ascii')
+    return prefix + '1' + bech32
 
 
 def decode_bech32(s):
     '''Convert a bech32 address to a witness program'''
-    hrp, raw_data = s.encode('ascii').split(b'1')
+    hrp, raw_data = s.split('1')
     data = [BECH32_ALPHABET.index(c) for c in raw_data]
     if not bech32_verify_checksum(hrp, data):
         raise ValueError('bad address: {}'.format(s))

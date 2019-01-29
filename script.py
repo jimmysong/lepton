@@ -60,16 +60,16 @@ def p2sh_script(h160):
 
 def multisig_redeem_script(m, points):
     '''Creates an m-of-n multisig p2sh redeem script'''
-    # start the instructions with m (note OP_1 is 0x51, OP_2 is 0x52 and so on)
-    instructions = [m + 0x50]
+    # start the commands with m (note OP_1 is 0x51, OP_2 is 0x52 and so on)
+    commands = [m + 0x50]
     for point in points:
         # add each point's sec format pubkey
-        instructions.append(point.sec())
+        commands.append(point.sec())
     # add the n part
-    instructions.append(len(points) + 0x50)
+    commands.append(len(points) + 0x50)
     # add OP_CHECKMULTISIG
-    instructions.append(0xae)
-    return Script(instructions)
+    commands.append(0xae)
+    return Script(commands)
 
 
 def p2wpkh_script(h160):
@@ -82,7 +82,7 @@ def p2wsh_script(h256):
     return Script([0x00, h256])
 
 
-def print_state(instructions, instruction, stack, altstack):
+def print_state(commands, command, stack, altstack):
     LOGGER.info('-' * 78)
     print_altstack = len(altstack) > 0
     if print_altstack:
@@ -92,11 +92,11 @@ def print_state(instructions, instruction, stack, altstack):
         column_width = 24
         in_between = 3
     format_str = '{0: <' + str(column_width) + '}'
-    total_height = max(len(instructions), 1, len(stack))
+    total_height = max(len(commands), 1, len(stack))
     for i in range(total_height):
         to_print = ''
-        if len(instructions) >= total_height - i:
-            current = instructions[len(instructions) - (total_height - i)]
+        if len(commands) >= total_height - i:
+            current = commands[len(commands) - (total_height - i)]
             if type(current) == int:
                 current = OP_CODE_NAMES.get(current) or '<unknown>'
             else:
@@ -106,7 +106,7 @@ def print_state(instructions, instruction, stack, altstack):
             to_print += ' ' * column_width
         to_print += ' ' * in_between
         if i == total_height - 1:
-            current = instruction
+            current = command
             if type(current) == int:
                 current = OP_CODE_NAMES.get(current) or '<unknown>'
             else:
@@ -136,24 +136,27 @@ def print_state(instructions, instruction, stack, altstack):
 
 class Script:
 
-    def __init__(self, instructions, coinbase=None):
-        self.instructions = instructions
+    def __init__(self, commands, coinbase=None):
+        self.commands = commands
         self.coinbase = coinbase
 
     def __repr__(self):
         if self.coinbase:
             return self.coinbase.hex()
         result = []
-        for instruction in self.instructions:
-            if type(instruction) == int:
-                if OP_CODE_NAMES.get(instruction):
-                    name = OP_CODE_NAMES.get(instruction) or '<unknown>'
+        for command in self.commands:
+            if type(command) == int:
+                if OP_CODE_NAMES.get(command):
+                    name = OP_CODE_NAMES.get(command) or '<unknown>'
                 else:
-                    name = 'OP_[{}]'.format(instruction)
+                    name = 'OP_[{}]'.format(command)
                 result.append(name)
             else:
-                result.append(instruction.hex())
+                result.append(command.hex())
         return ' '.join(result)
+
+    def __eq__(self, other):
+        return self.commands == other.commands and self.coinbase == other.coinbase
 
     @classmethod
     def parse(cls, s, coinbase_mode=False):
@@ -161,8 +164,8 @@ class Script:
         length = read_varint(s)
         if coinbase_mode:
             return cls([], coinbase=s.read(length))
-        # initialize the instructions array
-        instructions = []
+        # initialize the commands array
+        commands = []
         # initialize the number of bytes we've read to 0
         count = 0
         # loop until we've read length bytes
@@ -175,51 +178,51 @@ class Script:
             current_byte = current[0]
             # if the current byte is between 1 and 75 inclusive
             if current_byte >= 1 and current_byte <= 75:
-                # we have an instruction set n to be the current byte
+                # we have an command set n to be the current byte
                 n = current_byte
-                # add the next n bytes as an instruction
-                instructions.append(s.read(n))
+                # add the next n bytes as an command
+                commands.append(s.read(n))
                 # increase the count by n
                 count += n
             elif current_byte == 76:
                 # op_pushdata1
                 data_length = little_endian_to_int(s.read(1))
-                instructions.append(s.read(data_length))
+                commands.append(s.read(data_length))
                 count += data_length + 1
             elif current_byte == 77:
                 # op_pushdata2
                 data_length = little_endian_to_int(s.read(2))
-                instructions.append(s.read(data_length))
+                commands.append(s.read(data_length))
                 count += data_length + 2
             elif current_byte == 78:
                 # op_pushdata4
                 data_length = little_endian_to_int(s.read(4))
-                instructions.append(s.read(data_length))
+                commands.append(s.read(data_length))
                 count += data_length + 4
             else:
                 # we have an op code. set the current byte to op_code
                 op_code = current_byte
-                # add the op_code to the list of instructions
-                instructions.append(op_code)
+                # add the op_code to the list of commands
+                commands.append(op_code)
         if count != length:
             raise RuntimeError('parsing script failed')
-        return cls(instructions)
+        return cls(commands)
 
     def raw_serialize(self):
         if self.coinbase:
             return self.coinbase
         # initialize what we'll send back
         result = b''
-        # go through each instruction
-        for instruction in self.instructions:
-            # if the instruction is an integer, it's an op code
-            if type(instruction) == int:
-                # turn the instruction into a single byte integer using int_to_little_endian
-                result += int_to_little_endian(instruction, 1)
+        # go through each command
+        for command in self.commands:
+            # if the command is an integer, it's an op code
+            if type(command) == int:
+                # turn the command into a single byte integer using int_to_little_endian
+                result += int_to_little_endian(command, 1)
             else:
                 # otherwise, this is an element
                 # get the length in bytes
-                length = len(instruction)
+                length = len(command)
                 # for large lengths, we have to use a pushdata op code
                 if length < 75:
                     # turn the length into a single byte integer
@@ -237,8 +240,8 @@ class Script:
                     result += int_to_little_endian(78, 1)
                     result += int_to_little_endian(length, 4)
                 else:
-                    raise RuntimeError('too long an instruction')
-                result += instruction
+                    raise RuntimeError('too long an command')
+                result += command
         return result
 
     def serialize(self):
@@ -256,67 +259,67 @@ class Script:
         return sha256(self.raw_serialize())
 
     def __add__(self, other):
-        return Script(self.instructions + other.instructions)
+        return Script(self.commands + other.commands)
 
     def evaluate(self, z, version, locktime, sequence, witness, bip65=True, bip112=True):
         # create a copy as we may need to add to this list if we have a
         # RedeemScript
-        instructions = self.instructions[:]
+        commands = self.commands[:]
         stack = []
         altstack = []
         if DEBUG:
-            print_state(instructions, b'', stack, altstack)
-        while len(instructions) > 0:
-            instruction = instructions.pop(0)
+            print_state(commands, b'', stack, altstack)
+        while len(commands) > 0:
+            command = commands.pop(0)
             if DEBUG:
-                print_state(instructions, instruction, stack, altstack)
-            if type(instruction) == int:
+                print_state(commands, command, stack, altstack)
+            if type(command) == int:
                 # do what the op code says
-                operation = OP_CODE_FUNCTIONS[instruction]
-                if instruction in (99, 100):
-                    # op_if/op_notif require the instructions array
-                    if not operation(stack, instructions):
-                        LOGGER.info('bad op: {}'.format(OP_CODE_NAMES[instruction]))
+                operation = OP_CODE_FUNCTIONS[command]
+                if command in (99, 100):
+                    # op_if/op_notif require the commands array
+                    if not operation(stack, commands):
+                        LOGGER.info('bad op: {}'.format(OP_CODE_NAMES[command]))
                         return False
-                elif instruction in (107, 108):
+                elif command in (107, 108):
                     # op_toaltstack/op_fromaltstack require the altstack
                     if not operation(stack, altstack):
-                        LOGGER.info('bad op: {}'.format(OP_CODE_NAMES[instruction]))
+                        LOGGER.info('bad op: {}'.format(OP_CODE_NAMES[command]))
                         return False
-                elif instruction in (172, 173, 174, 175):
+                elif command in (172, 173, 174, 175):
                     # these are signing operations, they need a sig_hash
                     # to check against
                     if not operation(stack, z):
-                        LOGGER.info('bad op: {}'.format(OP_CODE_NAMES[instruction]))
+                        LOGGER.info('bad op: {}'.format(OP_CODE_NAMES[command]))
                         return False
-                elif instruction == 177:
+                elif command == 177:
                     # op_checklocktimeverify requires locktime and sequence
                     if bip65 and not operation(stack, locktime, sequence):
                         LOGGER.info('bad cltv')
                         return False
-                elif instruction == 178:
+                elif command == 178:
                     # op_checksequenceverify requires version and sequence
                     if bip112 and not operation(stack, version, sequence):
                         LOGGER.info('bad csv')
                         return False
                 else:
                     if not operation(stack):
-                        LOGGER.info('bad op: {}'.format(OP_CODE_NAMES[instruction]))
+                        LOGGER.info('bad op: {}'.format(OP_CODE_NAMES[command]))
                         return False
             else:
-                # add the instruction to the stack
-                stack.append(instruction)
-                # p2sh rule. if the next three instructions are:
+                # add the command to the stack
+                stack.append(command)
+                # p2sh rule. if the next three commands are:
                 # OP_HASH160 <20 byte hash> OP_EQUAL this is the RedeemScript
                 # OP_HASH160 == 0xa9 and OP_EQUAL == 0x87
-                if len(instructions) == 3 and instructions[0] == 0xa9 \
-                    and type(instructions[1]) == bytes and len(instructions[1]) == 20 \
-                    and instructions[2] == 0x87:
-                    redeem_script = encode_varstr(instruction)
+                if len(commands) == 3 and commands[0] == 0xa9 \
+                    and type(commands[1]) == bytes and len(commands[1]) == 20 \
+                    and commands[2] == 0x87:
+                    redeem_script = encode_varstr(command)
                     # we execute the next three op codes
-                    instructions.pop()
-                    h160 = instructions.pop()
-                    instructions.pop()
+                    commands.pop()
+                    h160 = commands.pop()
+                    commands.pop()
                     if not op_hash160(stack):
                         return False
                     stack.append(h160)
@@ -328,75 +331,75 @@ class Script:
                         return False
                     # hashes match! now add the RedeemScript
                     stream = BytesIO(redeem_script)
-                    instructions.extend(Script.parse(stream).instructions)
-                # witness program version 0 rule. if stack instructions are:
+                    commands.extend(Script.parse(stream).commands)
+                # witness program version 0 rule. if stack commands are:
                 # 0 <20 byte hash> this is p2wpkh
                 if len(stack) == 2 and stack[0] == b'' and len(stack[1]) == 20:
                     h160 = stack.pop()
                     stack.pop()
-                    instructions.extend(witness)
-                    instructions.extend(p2pkh_script(h160).instructions)
-                # witness program version 0 rule. if stack instructions are:
+                    commands.extend(witness)
+                    commands.extend(p2pkh_script(h160).commands)
+                # witness program version 0 rule. if stack commands are:
                 # 0 <32 byte hash> this is p2wsh
                 if len(stack) == 2 and stack[0] == b'' and len(stack[1]) == 32:
                     h256 = stack.pop()
                     stack.pop()
-                    instructions.extend(witness[:-1])
+                    commands.extend(witness[:-1])
                     witness_script = witness[-1]
                     if h256 != sha256(witness_script):
                         LOGGER.info('bad sha256 {} vs {}'.format(h256.hex(), sha256(witness_script).hex()))
                         return False
                     # hashes match! now add the Witness Script
                     stream = BytesIO(encode_varstr(witness_script))
-                    witness_script_instructions = Script.parse(stream).instructions
-                    instructions.extend(witness_script_instructions)
+                    witness_script_commands = Script.parse(stream).commands
+                    commands.extend(witness_script_commands)
                     if DEBUG:
-                        print_state(instructions, b'', stack, altstack)
+                        print_state(commands, b'', stack, altstack)
         if len(stack) == 0:
             LOGGER.info('empty stack')
             return False
         if stack.pop() == b'':
-            LOGGER.info('bad instruction left')
+            LOGGER.info('bad command left')
             return False
         return True
 
     def is_p2pkh_script_pubkey(self):
         '''Returns whether this follows the
         OP_DUP OP_HASH160 <20 byte hash> OP_EQUALVERIFY OP_CHECKSIG pattern.'''
-        return len(self.instructions) == 5 and self.instructions[0] == 0x76 \
-            and self.instructions[1] == 0xa9 \
-            and type(self.instructions[2]) == bytes and len(self.instructions[2]) == 20 \
-            and self.instructions[3] == 0x88 and self.instructions[4] == 0xac
+        return len(self.commands) == 5 and self.commands[0] == 0x76 \
+            and self.commands[1] == 0xa9 \
+            and type(self.commands[2]) == bytes and len(self.commands[2]) == 20 \
+            and self.commands[3] == 0x88 and self.commands[4] == 0xac
 
     def is_p2sh_script_pubkey(self):
         '''Returns whether this follows the
         OP_HASH160 <20 byte hash> OP_EQUAL pattern.'''
-        return len(self.instructions) == 3 and self.instructions[0] == 0xa9 \
-            and type(self.instructions[1]) == bytes and len(self.instructions[1]) == 20 \
-            and self.instructions[2] == 0x87
+        return len(self.commands) == 3 and self.commands[0] == 0xa9 \
+            and type(self.commands[1]) == bytes and len(self.commands[1]) == 20 \
+            and self.commands[2] == 0x87
 
     def is_p2wpkh_script_pubkey(self):
         '''Returns whether this follows the
         OP_0 <20 byte hash> pattern.'''
-        return len(self.instructions) == 2 and self.instructions[0] == 0x00 \
-            and type(self.instructions[1]) == bytes and len(self.instructions[1]) == 20
+        return len(self.commands) == 2 and self.commands[0] == 0x00 \
+            and type(self.commands[1]) == bytes and len(self.commands[1]) == 20
 
     def is_p2wsh_script_pubkey(self):
         '''Returns whether this follows the
         OP_0 <20 byte hash> pattern.'''
-        return len(self.instructions) == 2 and self.instructions[0] == 0x00 \
-            and type(self.instructions[1]) == bytes and len(self.instructions[1]) == 32
+        return len(self.commands) == 2 and self.commands[0] == 0x00 \
+            and type(self.commands[1]) == bytes and len(self.commands[1]) == 32
 
     def address(self, testnet=False):
         '''Returns the address corresponding to the script'''
         if self.is_p2pkh_script_pubkey():  # p2pkh
             # hash160 is the 3rd element
-            h160 = self.instructions[2]
+            h160 = self.commands[2]
             # convert to p2pkh address using h160_to_p2pkh_address (remember testnet)
             return h160_to_p2pkh_address(h160, testnet)
         elif self.is_p2sh_script_pubkey():  # p2sh
             # hash160 is the 2nd element
-            h160 = self.instructions[1]
+            h160 = self.commands[1]
             # convert to p2sh address using h160_to_p2sh_address (remember testnet)
             return h160_to_p2sh_address(h160, testnet)
         elif self.is_p2wpkh_script_pubkey():  # p2sh
@@ -411,7 +414,7 @@ class Script:
             return encode_bech32_checksum(witness_program, testnet)
 
     def has_op_return(self):
-        return 106 in self.instructions
+        return 106 in self.commands
 
 
 class ScriptTest(TestCase):
@@ -420,9 +423,9 @@ class ScriptTest(TestCase):
         script_pubkey = BytesIO(bytes.fromhex('6a47304402207899531a52d59a6de200179928ca900254a36b8dff8bb75f5f5d71b1cdc26125022008b422690b8461cb52c3cc30330b23d574351872b7c361e9aae3649071c1a7160121035d5c93d9ac96881f19ba1f686f15f009ded7c62efe85a872e6a19b43c15a2937'))
         script = Script.parse(script_pubkey)
         want = bytes.fromhex('304402207899531a52d59a6de200179928ca900254a36b8dff8bb75f5f5d71b1cdc26125022008b422690b8461cb52c3cc30330b23d574351872b7c361e9aae3649071c1a71601')
-        self.assertEqual(script.instructions[0].hex(), want.hex())
+        self.assertEqual(script.commands[0].hex(), want.hex())
         want = bytes.fromhex('035d5c93d9ac96881f19ba1f686f15f009ded7c62efe85a872e6a19b43c15a2937')
-        self.assertEqual(script.instructions[1], want)
+        self.assertEqual(script.commands[1], want)
 
     def test_serialize(self):
         want = '6a47304402207899531a52d59a6de200179928ca900254a36b8dff8bb75f5f5d71b1cdc26125022008b422690b8461cb52c3cc30330b23d574351872b7c361e9aae3649071c1a7160121035d5c93d9ac96881f19ba1f686f15f009ded7c62efe85a872e6a19b43c15a2937'
@@ -524,10 +527,10 @@ class ScriptTest(TestCase):
     def test_coinbase_script_sig(self):
         raw_script = bytes.fromhex('4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73')
         s = Script.parse(BytesIO(raw_script))
-        self.assertTrue(s.instructions[2].find(b'The Times 03/Jan/2009') != -1)
+        self.assertTrue(s.commands[2].find(b'The Times 03/Jan/2009') != -1)
 
     def test_address_to_script_pubkey(self):
         address = 'tb1qm6jesfwzg7w4xjq3tw9uj4wwz2gy73yym4mw5w'
         script_pubkey = address_to_script_pubkey(address)
-        self.assertEqual(script_pubkey.instructions[0], 0)
-        self.assertEqual(script_pubkey.instructions[1].hex(), 'dea59825c2479d5348115b8bc955ce12904f4484')
+        self.assertEqual(script_pubkey.commands[0], 0)
+        self.assertEqual(script_pubkey.commands[1].hex(), 'dea59825c2479d5348115b8bc955ce12904f4484')

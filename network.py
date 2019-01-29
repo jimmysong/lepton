@@ -780,6 +780,7 @@ class SimpleNode:
                 yield h[::-1], self.wait_for(Tx)
 
     def send_tx(self, tx_obj):
+        print(tx_obj.serialize().hex())
         if tx_obj.segwit:
             return self.send_tx_segwit(tx_obj)
         else:
