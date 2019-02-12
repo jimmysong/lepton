@@ -317,7 +317,7 @@ class EncryptedPrivateTest(TestCase):
 
 class Wallet:
 
-    def __init__(self, encrypted_private, public, next_external, next_internal, creation_height, sync_height, utxos, stxos, filename):
+    def __init__(self, encrypted_private, public, next_external, next_internal, creation_height, sync_height, utxos, stxos, filename, host=None):
         self.encrypted_private = encrypted_private
         self.public = public
         self.next_external = next_external
@@ -329,7 +329,11 @@ class Wallet:
         self.filename = filename
         self.testnet = self.public.testnet
         self.tx_store = TxStore.get_store(testnet=self.testnet)
-        self.node = SimpleNode(host='192.168.1.200', testnet=self.testnet)
+        if host:
+            self.connect(host)
+
+    def connect(self, host):
+        self.node = SimpleNode(host=host, testnet=self.testnet)
         self.block_store = BlockStore(node=self.node, include=self.sync_height)
         sleep(1)
         if not self.creation_height:
@@ -355,7 +359,7 @@ class Wallet:
             network = b"0'"
         path = b"m/84'/" + network + b"/0'"
         public = encrypted_private.private_key.traverse(path).pub
-        wallet = cls(encrypted_private, public, 0, 0, None, None, [], [], filename=filename)
+        wallet = cls(encrypted_private, public, 0, 0, 0, 0, [], [], filename=filename)
         wallet.save()
         return mnemonic, wallet
 
@@ -375,7 +379,7 @@ class Wallet:
             network = b"0'"
         path = b"m/84'/" + network + b"/0'"
         public = encrypted_private.private_key.traverse(path).pub
-        wallet = cls(encrypted_private, public, 0, 0, None, None, [], [], filename=filename)
+        wallet = cls(encrypted_private, public, 0, 0, 0, 0, [], [], filename=filename)
         # TODO: determine how many addresses have been used
         # TODO: determine what height to start at
         wallet.save()
@@ -628,7 +632,6 @@ class WalletTest(TestCase):
         self.assertEqual(len(w.utxo_lookup), 0)
         self.assertEqual(len(w.stxo_lookup), 0)
         w.save()
-        w.update()
 
     @patch('getpass.getpass')
     def test_recover(self, gp):
@@ -641,6 +644,8 @@ class WalletTest(TestCase):
         w.creation_height = 1455663
         w.next_external = 1
         self.assertEqual(w.__repr__(), '1 0')
+        # TODO: get an rpc server running locally that serves up blocks and filters
+        w.connect('192.168.1.200')
         w.rescan()
         self.assertEqual(len(w.utxo_lookup), 1)
         tx_id = bytes.fromhex('07affe8b0ef5f009eef5399c20586b3181103564e8ffe444631dcae20389738c')

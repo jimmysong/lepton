@@ -1,7 +1,9 @@
 jupyter
-kivy
 mock
 pbkdf2
 pycryptodome
 requests
 siphash
+nose
+coverage
+csiphash
