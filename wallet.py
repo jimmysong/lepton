@@ -3,7 +3,7 @@ import getpass
 from Crypto.Cipher import AES
 from io import BytesIO
 from logging import getLogger
-from mock import patch
+from mock import patch, Mock
 from os import unlink
 from os.path import exists, isfile
 from secrets import token_bytes
@@ -25,10 +25,12 @@ from helper import (
 )
 from network import (
     BLOCK_DATA_TYPE,
-    SimpleNode,
-    GetCFiltersMessage,
     CFilterMessage,
+    GetCFiltersMessage,
     GetDataMessage,
+    NetworkEnvelope,
+    SimpleNode,
+    VerAckMessage,
 )
 from script import Script, address_to_script_pubkey, p2wpkh_script
 from tx import TxStore, Tx, TxIn, TxOut
@@ -634,7 +636,9 @@ class WalletTest(TestCase):
         w.save()
 
     @patch('getpass.getpass')
-    def test_recover(self, gp):
+    @patch('socket.socket')
+    def test_recover(self, mock_socket, gp):
+        mock_socket.return_value.makefile.return_value = open('unittest.expected', 'rb')
         gp.return_value = 'password'
         filename = 'tmp.wallet'
         if exists(filename):
@@ -644,8 +648,7 @@ class WalletTest(TestCase):
         w.creation_height = 1455663
         w.next_external = 1
         self.assertEqual(w.__repr__(), '1 0')
-        # TODO: get an rpc server running locally that serves up blocks and filters
-        w.connect('192.168.1.200')
+        w.connect('nowhere')
         w.rescan()
         self.assertEqual(len(w.utxo_lookup), 1)
         tx_id = bytes.fromhex('07affe8b0ef5f009eef5399c20586b3181103564e8ffe444631dcae20389738c')

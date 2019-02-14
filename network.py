@@ -67,6 +67,7 @@ class NetworkEnvelope:
     def parse(cls, s, testnet=False):
         '''Takes a stream and creates a NetworkEnvelope'''
         # check the network magic
+        print(s)
         magic = s.read(4)
         if magic == b'':
             raise RuntimeError('Connection reset!')
@@ -686,6 +687,7 @@ class SimpleNode:
         # connect to socket
         self.host = host
         self.port = port
+        self.tmp = open('tmp', 'wb')
         self.latest_block = latest_block
         LOGGER.info('initiating connection')
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -721,6 +723,7 @@ class SimpleNode:
     def read(self):
         '''Read a message from the socket'''
         envelope = NetworkEnvelope.parse(self.stream, testnet=self.testnet)
+        self.tmp.write(envelope.serialize())
         if self.logging:
             LOGGER.info('receiving: {}'.format(envelope))
         return envelope
